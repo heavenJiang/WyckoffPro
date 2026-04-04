@@ -1,0 +1,95 @@
+data:
+  source: tushare             # 主数据源
+  fallback_source: akshare    # 备用数据源
+  tushare_token: ""           # 请填写您的 Tushare token
+  history_years: 5
+  update_schedule: "15:30"
+  db_path: "data/wyckoffpro.db"
+
+thresholds:
+  climax_vol_percentile: 95
+  climax_range_percentile: 95
+  spring_max_penetration_atr: 1.5
+  st_vol_ratio: 0.60
+  tr_min_duration: 20
+  tr_max_amplitude: 0.25
+  joc_vol_percentile: 85
+  sot_shrink_ratio: 0.50
+  evr_vol_multiplier: 1.5
+  dead_corner_min_bars: 8
+  dead_corner_range_ratio: 0.40
+  adaptive_lookback: 120
+  adaptive_enabled: true
+
+phase_fsm:
+  min_evidence_for_transition: 2
+  anomaly_transition_alert: true
+
+# V3.1: 紧急反转配置
+emergency_reversal:
+  enabled: true
+  spring_fail_recovery_bars: 3
+  spring_fail_vol_multiplier: 1.5
+  new_extreme_confirm_bars: 5
+  weak_rally_consecutive: 2
+  yellow_alert_threshold: 31
+  orange_alert_threshold: 51
+  red_reversal_threshold: 71
+  score_decay_per_day: 0.5
+  score_max: 100
+
+signals:
+  min_likelihood_to_record: 0.30
+  min_likelihood_for_alert: 0.60
+  ambiguity_threshold: 0.15
+  chain_watch_threshold: 60
+  chain_advice_threshold: 85
+
+nine_tests:
+  min_pass_for_buy: 7
+  min_pass_for_watch: 5
+
+risk:
+  max_single_risk_pct: 2.0
+  max_total_risk_pct: 10.0
+  min_rr_ratio: 3.0
+  t1_overnight_premium: 0.005
+
+ai:
+  enabled: true
+  api_provider: deepseek
+  api_base_url: "https://api.deepseek.com"
+  api_key: ""                 # 请填写您的 DeepSeek API key
+  model: "deepseek-chat"
+  max_tokens: 2000
+  daily_token_budget: 200000
+  temperature: 0.1
+  # V3.1: 证伪引擎配置
+  falsification:
+    enabled: true
+    prompt_a_enabled: true    # 阶段证伪
+    prompt_b_enabled: true    # 信号证伪
+    prompt_c_enabled: true    # 叙事一致性
+    hardening_consecutive: 3  # 连续N次证伪失败后冷却
+    hardening_cooldown_days: 30
+    signal_falsify_min_likelihood: 0.50
+    signal_falsify_critical_types:
+      - "Spring"
+      - "JOC"
+      - "BreakIce"
+      - "LPSY"
+
+ui:
+  theme: dark
+  default_period: daily
+  chart_style: candle
+  alert_sound: true
+  page_title: "WyckoffPro V3.1"
+
+a_share_adapt:
+  enabled: true
+  limit_up_as_bc: true
+  limit_down_as_sc: true
+  north_flow_weight: 0.15
+  chip_data_enabled: false
+  t1_entry_delay: true
