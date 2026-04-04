@@ -24,7 +24,7 @@ if st.button("🚀 开始全量扫描 (Daily Pipeline)", type="primary"):
         results = []
         for i, w in enumerate(wl):
             code = w["stock_code"]
-            name = w.get("name", "")
+            name = w.get("stock_name", "")
             status_text.text(f"正在扫描: {code} {name} ... ({i+1}/{len(wl)})")
             
             try:
@@ -47,13 +47,30 @@ if st.button("🚀 开始全量扫描 (Daily Pipeline)", type="primary"):
             st.subheader("今日扫描信号概览")
             for r in results:
                 code = r["stock_code"]
+                # 尝试获取名称
+                name = ""
+                for w in wl:
+                    if w["stock_code"] == code:
+                        name = w.get("stock_name", "")
+                        break
+                
                 advice = r.get("advice", {}).get("advice_type", "WAIT")
                 conf = r.get("advice", {}).get("confidence", 0)
                 phase = r.get("phase", "UNKNOWN")
                 sigs = ", ".join([s["signal_type"] for s in r.get("signals", [])]) if r.get("signals") else "无"
+                meta = r.get("execution_meta", {})
+                duration = meta.get("total_duration", 0)
+                end_time = meta.get("end_time", "N/A")[-8:] # 只取时间部分
                 
-                with st.expander(f"[{code}] 建议: {advice} ({conf}%) | 阶段: {phase} | 信号: {sigs}"):
+                with st.expander(f"[{code} {name}] 建议: {advice} ({conf}%) | 耗时: {duration}s | 完成: {end_time}"):
                     if r.get("alerts"):
                         for alert in r.get("alerts"):
                             st.warning(f"⚠️ {alert.get('message')}")
+                    
+                    # 显示步骤详情
+                    if meta.get("steps"):
+                        cols = st.columns(len(meta["steps"]))
+                        for j, step in enumerate(meta["steps"]):
+                            cols[j].caption(f"{step['name']}\n{step['duration']}s")
+                            
                     st.write(r.get("advice", {}).get("summary", ""))

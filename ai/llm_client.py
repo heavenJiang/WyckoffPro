@@ -4,6 +4,7 @@ ai/llm_client.py — DeepSeek API 统一调用封装（OpenAI 兼容 SDK）
 from __future__ import annotations
 import json
 import time
+from datetime import datetime
 from typing import Optional, Dict, List
 from loguru import logger
 
@@ -32,6 +33,7 @@ class LLMClient:
         self.daily_budget = self.config.get("daily_token_budget", 200000)
         self._daily_used: int = 0
         self._client = None
+        self.last_call_metrics = {"timestamp": "N/A", "duration": 0, "tokens": 0}
 
         if self.enabled and self.api_key:
             self._init_client()
@@ -67,6 +69,7 @@ class LLMClient:
             full_messages.append({"role": "system", "content": system})
         full_messages.extend(messages)
 
+        start_time = time.time()
         for attempt in range(retries):
             try:
                 response = self._client.chat.completions.create(
@@ -75,10 +78,19 @@ class LLMClient:
                     max_tokens=max_tokens or self.max_tokens,
                     temperature=self.temperature,
                 )
+                duration = time.time() - start_time
                 content = response.choices[0].message.content
                 tokens = response.usage.total_tokens if response.usage else 0
                 self._daily_used += tokens
-                logger.debug(f"LLM调用成功，消耗{tokens}Token，今日已用{self._daily_used}/{self.daily_budget}")
+                
+                #记录最后一次调用的指标
+                self.last_call_metrics = {
+                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "duration": round(duration, 2),
+                    "tokens": tokens
+                }
+                
+                logger.debug(f"LLM调用成功 ({duration:.2f}s)，消耗{tokens}Token，今日已用{self._daily_used}/{self.daily_budget}")
                 return content
             except Exception as e:
                 wait = 2 ** attempt

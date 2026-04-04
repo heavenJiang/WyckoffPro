@@ -1,7 +1,7 @@
 data:
   source: tushare             # 主数据源
   fallback_source: akshare    # 备用数据源
-  tushare_token: ""           # 请填写您的 Tushare token
+  tushare_token: "YOUR_TUSHARE_TOKEN_HERE"  # 请填写您的 Tushare token
   history_years: 5
   update_schedule: "15:30"
   db_path: "data/wyckoffpro.db"
@@ -59,7 +59,7 @@ ai:
   enabled: true
   api_provider: deepseek
   api_base_url: "https://api.deepseek.com"
-  api_key: ""                 # 请填写您的 DeepSeek API key
+  api_key: "YOUR_DEEPSEEK_API_KEY_HERE"  # 请填写您的 DeepSeek API key
   model: "deepseek-chat"
   max_tokens: 2000
   daily_token_budget: 200000

@@ -53,6 +53,14 @@ def _df_to_table(df: pd.DataFrame, cols: list = None, max_rows: int = 20) -> str
     return tail.to_markdown(index=False) if hasattr(tail, "to_markdown") else tail.to_string(index=False)
 
 
+def _render_prompt(template_str: str, **kwargs) -> str:
+    """安全的Prompt内容替换，避免str.format()导致JSON的{}符号抛出KeyError"""
+    res = template_str
+    for k, v in kwargs.items():
+        res = res.replace(f"{{{k}}}", str(v))
+    return res
+
+
 class FalsificationEngine:
     """
     证伪引擎：三层证伪（阶段/信号/叙事一致性）。
@@ -85,7 +93,7 @@ class FalsificationEngine:
         from engine.phase_fsm import PHASES
         phase_name = PHASES.get(phase_info, {}).get("name", "未知")
 
-        prompt = template.format(
+        prompt = _render_prompt(template,
             stock_code=stock_code,
             phase_code=phase_info,
             phase_name=phase_name,
@@ -139,7 +147,7 @@ class FalsificationEngine:
         kline_table = _df_to_table(context_df, cols=["trade_date", "open", "high", "low", "close", "volume"])
 
         recent_signals = context.get("recent_signals_str", "（未知）")
-        prompt = template.format(
+        prompt = _render_prompt(template,
             signal_type=sig_type,
             signal_date=sig_date,
             likelihood=f"{sig_likelihood:.2f}",
@@ -183,7 +191,7 @@ class FalsificationEngine:
             f"{e.signal_type}({e.date})" for e in events
         ) if events else "（无信号链事件）"
 
-        prompt = template.format(
+        prompt = _render_prompt(template,
             weekly_phase=getattr(mtf_alignment, "weekly_phase", "N/A"),
             weekly_conf=round(getattr(mtf_alignment, "weekly_conf", 0) * 100),
             daily_phase=getattr(phase_state, "phase_code", "N/A"),

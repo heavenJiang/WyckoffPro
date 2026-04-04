@@ -90,7 +90,7 @@ class SupplyDemandScore:
         up = recent[recent["close"] >= recent["open"]]
         down = recent[recent["close"] < recent["open"]]
         avg_up = up["volume"].mean() if not up.empty else 0
-        avg_down = down["volume"].mean() if not down.empty else 1
+        avg_down = down["volume"].mean() if not down.empty else 0
         ratio = avg_up / (avg_down + 1e-9)
         return min(1.0, max(0.0, ratio / 2.0))  # ratio=1 → 0.5, ratio=2 → 1.0
 

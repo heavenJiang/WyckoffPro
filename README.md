@@ -76,6 +76,9 @@ ai:
 
 ## 💻 使用说明 (Usage)
 
+使用虚拟环境启动命令：
+source .venv/bin/activate && streamlit run ui/app.py
+
 启动 Streamlit 交互式界面：
 
 ```bash

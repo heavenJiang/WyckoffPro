@@ -1,4 +1,4 @@
-python>=3.11
+
 pandas>=2.0
 numpy>=1.24
 tushare>=1.2.89

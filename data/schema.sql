@@ -26,6 +26,24 @@ CREATE TABLE IF NOT EXISTS kline_weekly (
     PRIMARY KEY (stock_code, trade_date)
 );
 
+-- 月K线数据
+CREATE TABLE IF NOT EXISTS kline_monthly (
+    stock_code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume INTEGER, amount REAL, pct_change REAL, amplitude REAL,
+    PRIMARY KEY (stock_code, trade_date)
+);
+
+-- 小时线数据 (60min)
+CREATE TABLE IF NOT EXISTS kline_hourly (
+    stock_code TEXT NOT NULL,
+    trade_date TEXT NOT NULL, -- 格式: YYYY-MM-DD HH:MM:SS
+    open REAL, high REAL, low REAL, close REAL,
+    volume INTEGER, amount REAL, pct_change REAL, amplitude REAL,
+    PRIMARY KEY (stock_code, trade_date)
+);
+
 -- 威科夫阶段
 CREATE TABLE IF NOT EXISTS wyckoff_phase (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,3 +210,18 @@ CREATE INDEX IF NOT EXISTS idx_wyckoff_signal_code ON wyckoff_signal(stock_code,
 CREATE INDEX IF NOT EXISTS idx_wyckoff_phase_code ON wyckoff_phase(stock_code);
 CREATE INDEX IF NOT EXISTS idx_counter_evidence_code ON counter_evidence(stock_code, is_active);
 CREATE INDEX IF NOT EXISTS idx_advice_code ON advice(stock_code, created_at);
+
+-- 策略回测结果历史
+CREATE TABLE IF NOT EXISTS backtest_result (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL,
+    stock_name TEXT,
+    run_at TEXT NOT NULL,
+    timeframe TEXT,
+    entry_signals TEXT, -- JSON array
+    metrics TEXT,       -- JSON object
+    trades TEXT,        -- JSON array
+    config_snapshot TEXT -- JSON object
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_result_code ON backtest_result(stock_code, run_at);

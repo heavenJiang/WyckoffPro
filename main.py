@@ -5,16 +5,31 @@ main.py — WyckoffPro V3.1 主入口
 from __future__ import annotations
 import os
 import sys
+import time
 import yaml
 import asyncio
 from datetime import datetime
+from typing import List, Dict
 from loguru import logger
+import pandas as pd
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 未安装时直接从系统环境变量读取
 
 
 # ─── 全局配置加载 ───
 def load_config(config_path: str = "config/default.yaml") -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    # 环境变量覆盖 yaml 占位符（优先级：.env / 系统环境变量 > yaml）
+    if os.getenv("TUSHARE_TOKEN"):
+        cfg["data"]["tushare_token"] = os.getenv("TUSHARE_TOKEN")
+    if os.getenv("DEEPSEEK_API_KEY"):
+        cfg["ai"]["api_key"] = os.getenv("DEEPSEEK_API_KEY")
+    return cfg
 
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
@@ -48,6 +63,7 @@ from ai.advisor import AIAdvisor, UserContext, build_quant_scores
 from trade.risk_manager import RiskManager
 from trade.plan_generator import TradePlanGenerator
 from trade.position_tracker import PositionTracker
+from data.tushare_hub import TushareHub
 
 
 # ─── 单例初始化 ───
@@ -75,12 +91,24 @@ risk_mgr = RiskManager(config)
 plan_gen = TradePlanGenerator(config, storage, risk_mgr)
 position_tracker = PositionTracker(storage)
 
+tushare_hub = TushareHub(
+    token=config["data"].get("tushare_token", ""),
+    db_path=config["data"].get("db_path", "data/wyckoffpro.db"),
+)
+
+
+
 
 async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> dict:
     """
     每日收盘后对单只股票的完整分析流程。
-    对应文档 5.4 节。
     """
+    start_time = time.time()
+    execution_meta = {
+        "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "steps": []
+    }
+    
     logger.info(f"═══ 开始分析 {stock_code} ({timeframe}) ═══")
 
     # ── L1: 数据获取 ──
@@ -88,7 +116,18 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
     if df.empty:
         logger.warning(f"{stock_code} 无历史数据，尝试采集...")
         df = await asyncio.to_thread(collector.update_stock, stock_code)
+        execution_meta["steps"].append({
+            "name": "Data Fetching",
+            **collector.last_fetch_metrics
+        })
         df = storage.get_klines(stock_code, timeframe, 200)
+    else:
+        execution_meta["steps"].append({
+            "name": "Data Load (Local)",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "duration": 0.01,
+            "source": "SQLite"
+        })
     if df.empty:
         return {"error": "无法获取数据"}
 
@@ -160,6 +199,10 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
             sig_dict = sig.to_dict()
             sig_dict["original_likelihood"] = sig.likelihood
             result = falsification_engine.falsify_signal(stock_code, sig, df, phase_state, context)
+            execution_meta["steps"].append({
+                "name": f"Signal Falsify ({sig.signal_type})",
+                **llm.last_call_metrics
+            })
             if result:
                 signal_falsifications[sig.signal_type] = {**result, "original_likelihood": sig.likelihood}
 
@@ -172,6 +215,10 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
     )
     if should_phase_falsi:
         phase_falsification = falsification_engine.falsify_phase(stock_code, phase_state, df, context)
+        execution_meta["steps"].append({
+            "name": "Phase Falsify",
+            **llm.last_call_metrics
+        })
         if phase_falsification:
             falsification_scheduler.record(stock_code, phase_falsification.get("falsification_result", ""))
 
@@ -180,6 +227,10 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
         stock_code, phase_state, chain, sd_score, sd_breakdown,
         ce_result, mtf_alignment
     )
+    execution_meta["steps"].append({
+        "name": "Narrative Check (Prompt C)",
+        **llm.last_call_metrics
+    })
 
     # ── 聚合证伪结果 ──
     adj = falsification_aggregator.process_results(
@@ -242,6 +293,10 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
             "token_used": llm.daily_used,
         })
 
+    end_time = time.time()
+    execution_meta["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    execution_meta["total_duration"] = round(end_time - start_time, 2)
+
     result = {
         "stock_code": stock_code,
         "trade_date": str(df.iloc[-1].get("trade_date", "")),
@@ -256,6 +311,7 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
         "quant_total": qs.total,
         "advice": advice,
         "pnf_targets": pnf_targets,
+        "execution_meta": execution_meta,
         "channel": {
             "support_1": channel.support_1,
             "support_2": channel.support_2,
@@ -304,9 +360,6 @@ def _build_context(df, phase_state, thresholds) -> dict:
     return ctx
 
 
-import pandas as pd
-
-
 def _build_nine_tests_context(df, phase_state, chain, context, thresholds) -> dict:
     """构建九大买入检验上下文"""
     return {
@@ -332,8 +385,28 @@ def _build_nine_tests_context(df, phase_state, chain, context, thresholds) -> di
 
 
 if __name__ == "__main__":
-    # 直接运行时执行全量分析
-    import asyncio
-    stocks = storage.get_watchlist()
-    for s in stocks:
-        asyncio.run(daily_analysis_pipeline(s["stock_code"]))
+    import sys
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "analyze"
+    stocks = [s["stock_code"] for s in storage.get_watchlist()]
+
+    if cmd == "hub-full":
+        # 首次全量同步所有数据（耗时较长）
+        tushare_hub.full_sync(stocks)
+
+    elif cmd == "hub-daily":
+        # 每日收盘后增量同步
+        trade_date = sys.argv[2] if len(sys.argv) > 2 else None
+        tushare_hub.daily_sync(stocks, trade_date)
+
+    elif cmd == "hub-weekly":
+        # 每周末深度同步
+        tushare_hub.weekly_sync(stocks)
+
+    elif cmd == "hub-monthly":
+        # 每月宏观数据
+        tushare_hub.monthly_sync()
+
+    else:
+        # 默认：威科夫分析 pipeline
+        for s in stocks:
+            asyncio.run(daily_analysis_pipeline(s))

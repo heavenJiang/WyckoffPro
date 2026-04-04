@@ -20,10 +20,11 @@ with tab1:
     
     if wl:
         for w in wl:
-            col1, col2, col3 = st.columns([2, 5, 2])
+            col1, col2, col3, col4 = st.columns([2, 3, 3, 2])
             col1.write(f"**{w['stock_code']}**")
-            col2.write(w.get("name", ""))
-            if col3.button("删除", key=f"del_{w['stock_code']}"):
+            col2.write(w.get("stock_name", ""))
+            col3.write(w.get("added_at", "-"))
+            if col4.button("删除", key=f"del_{w['stock_code']}"):
                 with storage._get_conn() as conn:
                     conn.execute("DELETE FROM watchlist WHERE stock_code=?", (w['stock_code'],))
                 st.success(f"已删除 {w['stock_code']}")
@@ -38,8 +39,7 @@ with tab1:
     if st.button("➕ 添加"):
         if new_code:
             try:
-                with storage._get_conn() as conn:
-                    conn.execute("INSERT OR REPLACE INTO watchlist (stock_code, name, active) VALUES (?, ?, 1)", (new_code, new_name))
+                storage.add_to_watchlist(new_code, new_name)
                 st.success("添加成功！")
                 st.rerun()
             except Exception as e:

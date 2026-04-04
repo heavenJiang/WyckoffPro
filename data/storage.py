@@ -25,12 +25,16 @@ class DataStorage:
         return conn
 
     def _init_db(self):
-        """初始化数据库，执行schema.sql"""
-        schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
-        with open(schema_path, "r", encoding="utf-8") as f:
-            sql = f.read()
-        with self._get_conn() as conn:
-            conn.executescript(sql)
+        """初始化数据库，执行 schema.sql + schema_ext.sql"""
+        base = os.path.dirname(__file__)
+        for schema_file in ("schema.sql", "schema_ext.sql"):
+            path = os.path.join(base, schema_file)
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                sql = f.read()
+            with self._get_conn() as conn:
+                conn.executescript(sql)
         logger.info(f"Database initialized: {self.db_path}")
 
     # ─── K线数据 ───
@@ -216,19 +220,35 @@ class DataStorage:
             cur = conn.execute(sql, plan)
             return cur.lastrowid
 
+    def update_trade_plan_status(self, plan_id: int, status: str):
+        """更新交易计划状态"""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE trade_plan SET status=? WHERE id=?",
+                (status, plan_id)
+            )
+
     def get_trade_plans(self, stock_code: str = None, status: str = None) -> List[Dict]:
         conditions, params = [], []
         if stock_code:
-            conditions.append("stock_code=?")
+            conditions.append("tp.stock_code=?")
             params.append(stock_code)
         if status:
-            conditions.append("status=?")
+            conditions.append("tp.status=?")
             params.append(status)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        
+        # 尝试从 watchlist 或 stock_info 获取名称
+        sql = f"""
+            SELECT tp.*, COALESCE(w.stock_name, si.stock_name, tp.stock_code) as stock_name
+            FROM trade_plan tp
+            LEFT JOIN watchlist w ON tp.stock_code = w.stock_code
+            LEFT JOIN stock_info si ON tp.stock_code = si.stock_code
+            {where}
+            ORDER BY tp.created_at DESC
+        """
         with self._get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM trade_plan {where} ORDER BY created_at DESC", params
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     # ─── 自选股 ───
@@ -309,3 +329,75 @@ class DataStorage:
         with self._get_conn() as conn:
             rows = conn.execute("SELECT * FROM watchlist GROUP BY stock_code").fetchall()
         return [dict(r) for r in rows]
+
+    def get_stock_info(self, stock_code: str) -> Optional[Dict]:
+        """获取股票基本信息"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM stock_info WHERE stock_code=?", (stock_code,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_stock_name(self, stock_code: str) -> str:
+        """多级尝试获取股票名称：Watchlist -> StockInfo -> StockCode"""
+        with self._get_conn() as conn:
+            # 尝试自选股映射
+            w = conn.execute("SELECT stock_name FROM watchlist WHERE stock_code=?", (stock_code,)).fetchone()
+            if w and w["stock_name"]:
+                return w["stock_name"]
+            
+            # 尝试库内信息
+            s = conn.execute("SELECT stock_name FROM stock_info WHERE stock_code=?", (stock_code,)).fetchone()
+            if s and s["stock_name"]:
+                return s["stock_name"]
+            
+        return stock_code
+
+    # ─── 回测结果 ───
+    def save_backtest_result(self, stock_code: str, timeframe: str, entry_signals: List[str], metrics: Dict, trades: List[Dict], stock_name: str = None):
+        """保存回测结果历史版本"""
+        # 优先使用传入的名称，否则多级查找
+        name = stock_name or self.get_stock_name(stock_code)
+        
+        sql = """
+            INSERT INTO backtest_result (
+                stock_code, stock_name, run_at, timeframe, 
+                entry_signals, metrics, trades
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        with self._get_conn() as conn:
+            conn.execute(sql, (
+                stock_code, name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                timeframe, json.dumps(entry_signals), 
+                json.dumps(metrics), json.dumps(trades)
+            ))
+            
+    def get_backtest_history(self, stock_code: str = None) -> List[Dict]:
+        """获取回测历史列表"""
+        where = "WHERE stock_code = ?" if stock_code else ""
+        params = (stock_code,) if stock_code else ()
+        
+        sql = f"SELECT id, stock_code, stock_name, run_at, timeframe, entry_signals, metrics FROM backtest_result {where} ORDER BY run_at DESC"
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["metrics"] = json.loads(d["metrics"]) if d["metrics"] else {}
+            d["entry_signals"] = json.loads(d["entry_signals"]) if d["entry_signals"] else []
+            results.append(d)
+        return results
+
+    def get_backtest_detail(self, result_id: int) -> Optional[Dict]:
+        """获取回测详情（含全部交易）"""
+        sql = "SELECT * FROM backtest_result WHERE id = ?"
+        with self._get_conn() as conn:
+            row = conn.execute(sql, (result_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["metrics"] = json.loads(d["metrics"]) if d["metrics"] else {}
+        d["trades"] = json.loads(d["trades"]) if d["trades"] else []
+        d["entry_signals"] = json.loads(d["entry_signals"]) if d["entry_signals"] else []
+        return d

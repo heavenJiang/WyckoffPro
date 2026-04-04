@@ -111,7 +111,7 @@ class SignalChainTracker:
         """计算链完成度百分比"""
         weights = ACC_CHAIN_WEIGHTS if chain.chain_type == "ACCUMULATION" else DIS_CHAIN_WEIGHTS
         achieved = sum(
-            weights.get(e.signal_type, 0) * min(1.0, e.likelihood * 1.2)
+            weights.get(e.signal_type, 0) * min(1.0, e.likelihood)
             for e in chain.events
         )
         total = sum(weights.values())

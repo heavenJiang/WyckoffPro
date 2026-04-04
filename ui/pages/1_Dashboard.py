@@ -40,17 +40,15 @@ for w in wl:
     phase_str = phase.get("phase_code", "UNKNOWN") if phase else "UNKNOWN"
     
     # 获取最新的AI建议
-    with storage._get_conn() as conn:
-        cursor = conn.execute("SELECT advice_type, confidence, summary, updated_at FROM trade_advice WHERE stock_code=? ORDER BY updated_at DESC LIMIT 1", (code,))
-        adv = cursor.fetchone()
-        
-    adv_type = adv[0] if adv else "WAIT"
-    adv_conf = adv[1] if adv else 0
-    adv_date = adv[3][:10] if adv else "N/A"
+    adv = storage.get_latest_advice(code)
+    
+    adv_type = adv.get("advice_type", "WAIT") if adv else "WAIT"
+    adv_conf = adv.get("confidence", 0) if adv else 0
+    adv_date = adv.get("created_at", "N/A")[:10] if adv else "N/A"
     
     data.append({
         "代码": code,
-        "名称": w.get("name", ""),
+        "名称": w.get("stock_name", ""),
         "当前阶段": phase_str,
         "最新建议": f"{adv_type} ({adv_conf}%)",
         "更新日期": adv_date

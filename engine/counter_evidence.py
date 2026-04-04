@@ -226,8 +226,8 @@ class CounterEvidenceTracker:
 
     def _add_event(self, state: CEState, event_type: str, date: str, delta: int, source: str):
         """添加事件并更新积分"""
-        # 同一天同类事件只计一次
-        for e in state.events[-20:]:
+        # 同一天同类事件只计一次（检查最近50条，防止超出20条后重复计分）
+        for e in state.events[-50:]:
             if e.event_type == event_type and e.date == date:
                 return
         state.score += delta

@@ -23,7 +23,7 @@ if not wl:
     st.warning("自选股为空")
     st.stop()
 
-stock_list = [f"{w['stock_code']} - {w.get('name', '')}" for w in wl]
+stock_list = [f"{w['stock_code']} - {w.get('stock_name', '')}" for w in wl]
 sel_stock = st.selectbox("选择分析标的", stock_list)
 
 if not sel_stock:
@@ -53,33 +53,36 @@ def load_analysis_data(code, force):
     else:
         ps = None
         
-    with storage._get_conn() as conn:
-        cursor = conn.execute("SELECT * FROM counter_evidence WHERE stock_code=?", (code,))
-        ce_row = cursor.fetchone()
-        ce_score = ce_row[1] if ce_row else 0
-        ce_alert = ce_row[3] if ce_row else "NONE"
-        ce_events = [] # 简化，实际应反序列化 history
-        
-        cursor = conn.execute("SELECT advice_type, confidence, summary, reasoning, trade_plan, key_watch_points, invalidation, alerts, generated_by FROM trade_advice WHERE stock_code=? ORDER BY updated_at DESC LIMIT 1", (code,))
-        adv = cursor.fetchone()
-        import json
+    ce_data = storage.get_counter_evidence(code)
+    ce_score = ce_data.get("current_score", 0) if ce_data else 0
+    ce_alert = ce_data.get("alert_level", "NONE") if ce_data else "NONE"
+    ce_events = ce_data.get("events", []) if ce_data else []
+    
+    advice = storage.get_latest_advice(code)
+    if advice is None:
         advice = {}
-        if adv:
-            advice = {
-                "advice_type": adv[0],
-                "confidence": adv[1],
-                "summary": adv[2],
-                "reasoning": adv[3],
-                "trade_plan": json.loads(adv[4]) if adv[4] else {},
-                "key_watch_points": json.loads(adv[5]) if adv[5] else [],
-                "invalidation": adv[6],
-                "alerts": json.loads(adv[7]) if adv[7] else [],
-                "generated_by": adv[8]
+        
+    execution_meta = {}
+    if force and 'res' in locals() and "execution_meta" in res:
+        execution_meta = res["execution_meta"]
+    else:
+        # 尝试从日志中恢复最近一次的元数据
+        logs = storage.get_falsification_history(code, limit=1)
+        if logs:
+            import json
+            detail = json.loads(logs[0]["detail"]) if isinstance(logs[0]["detail"], str) else logs[0]["detail"]
+            # 我们之前没在 log 里存 execution_meta，但在这次任务中我会让 pipeline 返回它
+            # 如果没有，就显示基本信息
+            execution_meta = {
+                "end_time": logs[0]["executed_at"],
+                "total_duration": "N/A (Historical)",
+                "steps": []
             }
             
+    with storage._get_conn() as conn:
         cursor = conn.execute("SELECT * FROM signal_chain WHERE stock_code=? AND status='ACTIVE'", (code,))
         chain_row = cursor.fetchone()
-        pct = chain_row[4] if chain_row else 0
+        pct = chain_row["completion_pct"] if chain_row else 0
         
     # TODO signals list
     signals = []
@@ -92,6 +95,7 @@ def load_analysis_data(code, force):
         "ce_events": ce_events,
         "advice": advice,
         "chain_pct": pct,
+        "execution_meta": execution_meta,
         "signals": signals
     }
 
@@ -99,7 +103,9 @@ data = load_analysis_data(stock_code, force_run)
 
 if data and not data["df"].empty:
     df = data["df"]
-    st.title(f"🔬 {sel_stock} 深度分析")
+    # 提取代码和名称用于显示
+    display_name = sel_stock # 格式通常是 "600000.SH - 浦发银行"
+    st.title(f"🔬 {display_name} 深度技术分析")
     
     col1, col2 = st.columns([3, 1])
     
@@ -130,3 +136,24 @@ if data and not data["df"].empty:
         st.metric("信号链完成度", f"{data['chain_pct']}%")
         if data["signals"]:
             render_signal_panel(data["signals"])
+
+    # 🚀 执行元数据 (全宽显示在底部)
+    st.divider()
+    meta = data.get("execution_meta", {})
+    if meta:
+        with st.expander("🚀 分析执行元数据与性能指标"):
+            st.info(f"分析流在 {meta.get('start_time')} 启动，总执行耗时: **{meta.get('total_duration')}s**")
+            
+            # 显示详细步骤表格
+            steps = meta.get("steps", [])
+            if steps:
+                st.write("各步骤执行明细：")
+                steps_df = pd.DataFrame(steps)
+                st.dataframe(steps_df, use_container_width=True, hide_index=True)
+    elif force_run:
+         st.info("正在执行分析，请稍候...")
+    else:
+        st.caption("暂无执行元数据（请点击 '刷新分析' 获取实时指标）")
+
+else:
+    st.warning("数据加载失败，请检查数据库或重试。")

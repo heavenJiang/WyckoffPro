@@ -25,6 +25,7 @@ class DataCollector:
         self._ts_pro = None
         self._ts_available = False
         self._ak_available = False
+        self.last_fetch_metrics = {"timestamp": "N/A", "duration": 0, "source": "N/A"}
         self._init_sources()
 
     def _init_sources(self):
@@ -33,12 +34,14 @@ class DataCollector:
         if self.tushare_token:
             try:
                 import tushare as ts
-                ts.set_token(self.tushare_token)
-                self._ts_pro = ts.pro_api()
+                # 使用第三方中转代理
+                self._ts_pro = ts.pro_api(self.tushare_token)
+                self._ts_pro._DataApi__http_url = 'http://lianghua.nanyangqiankun.top'
+                
                 # 测试连通性
                 self._ts_pro.trade_cal(exchange="SSE", start_date="20240101", end_date="20240102")
                 self._ts_available = True
-                logger.info("✅ Tushare 初始化成功（主数据源）")
+                logger.info("✅ Tushare 初始化成功（通过代理中转）")
             except Exception as e:
                 logger.warning(f"⚠️ Tushare 初始化失败：{e}，将降级到 AkShare")
 
@@ -60,6 +63,9 @@ class DataCollector:
         获取K线数据并自动选择数据源。
         返回标准化的 DataFrame。
         """
+        start_time = time.time()
+        source = "Tushare" if self._ts_available else "AkShare"
+
         if not end_date:
             end_date = datetime.now().strftime("%Y%m%d")
         if not start_date:
@@ -86,7 +92,14 @@ class DataCollector:
             logger.warning(f"无法获取 {stock_code} 数据")
             return pd.DataFrame()
 
-        return self._standardize(df, stock_code)
+        duration = time.time() - start_time
+        self.last_fetch_metrics = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "duration": round(duration, 2),
+            "source": source
+        }
+        
+        return self._standardize(df, stock_code, timeframe)
 
     def update_stock(self, stock_code: str):
         """增量更新某只股票的日K线数据"""
@@ -157,6 +170,9 @@ class DataCollector:
 
         if timeframe == "daily":
             df = self._ts_pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty:
+                logger.debug(f"Tushare Daily Result ({stock_code}):\n{df.head(3)}")
+            
             if df is None or df.empty:
                 return pd.DataFrame()
             # 获取前复权数据
@@ -172,6 +188,14 @@ class DataCollector:
                 df["close"] = df["close"] * df["adj_factor"] / latest_factor
         elif timeframe == "weekly":
             df = self._ts_pro.weekly(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        elif timeframe == "monthly":
+            df = self._ts_pro.monthly(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        elif timeframe == "hourly":
+            # 60分钟数据使用 stk_mins 接口
+            # 注意：stk_mins 的日期格式通常是 YYYY-MM-DD HH:MM:SS
+            df = self._ts_pro.stk_mins(ts_code=ts_code, freq='60min', start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty:
+                df = df.rename(columns={"trade_time": "trade_date", "vol": "volume"})
         else:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
 
@@ -185,6 +209,7 @@ class DataCollector:
         ts_code = self._to_tushare_code(stock_code)
         df = self._ts_pro.stock_basic(ts_code=ts_code, fields="ts_code,name,industry,market,list_date")
         if df is not None and not df.empty:
+            logger.debug(f"Tushare Stock Info Result ({stock_code}):\n{df}")
             row = df.iloc[0]
             return {
                 "stock_code": stock_code,
@@ -199,11 +224,15 @@ class DataCollector:
     def _fetch_akshare(self, stock_code: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
         import akshare as ak
         ak_code = self._to_akshare_code(stock_code)
-        period_map = {"daily": "daily", "weekly": "weekly"}
+        period_map = {"daily": "daily", "weekly": "weekly", "monthly": "monthly", "hourly": "60"}
         period = period_map.get(timeframe, "daily")
 
-        start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
-        end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+        # 处理可能带有时间的日期字符串 (YYYYMMDD HH:MM:SS)
+        start_clean = start_date.replace("-", "").replace(":", "").replace(" ", "")[:8]
+        end_clean = end_date.replace("-", "").replace(":", "").replace(" ", "")[:8]
+        
+        start_str = f"{start_clean[:4]}-{start_clean[4:6]}-{start_clean[6:8]}"
+        end_str = f"{end_clean[:4]}-{end_clean[4:6]}-{end_clean[6:8]}"
 
         try:
             df = ak.stock_zh_a_hist(
@@ -212,8 +241,12 @@ class DataCollector:
                 adjust="qfq"
             )
         except Exception:
-            df = ak.stock_zh_a_daily(symbol=f"sz{ak_code}" if ak_code.startswith("0") or ak_code.startswith("3") else f"sh{ak_code}",
-                                      start_date=start_str, end_date=end_str, adjust="qfq")
+            if timeframe == "hourly":
+                # 小时线如果 hist 失败，尝试实时的分钟数据（可能获取量有限）
+                df = pd.DataFrame() 
+            else:
+                df = ak.stock_zh_a_daily(symbol=f"sz{ak_code}" if ak_code.startswith("0") or ak_code.startswith("3") else f"sh{ak_code}",
+                                          start_date=start_str, end_date=end_str, adjust="qfq")
 
         if df is not None and not df.empty:
             # 标准化列名
@@ -247,7 +280,7 @@ class DataCollector:
 
     # ─── 工具 ───
     @staticmethod
-    def _standardize(df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
+    def _standardize(df: pd.DataFrame, stock_code: str, timeframe: str = "daily") -> pd.DataFrame:
         """标准化K线DataFrame"""
         # 确保必要列存在
         required = {"trade_date", "open", "high", "low", "close", "volume"}
@@ -259,7 +292,11 @@ class DataCollector:
                     logger.warning(f"缺少列：{col}")
                     df[col] = np.nan
 
-        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
+        # 日期格式处理：小时线保留时间，其他仅日期
+        if timeframe == "hourly":
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
 
         # 计算派生字段
         for col in ["open", "high", "low", "close"]:
@@ -272,19 +309,30 @@ class DataCollector:
         if "amplitude" not in df.columns:
             df["amplitude"] = (df["high"] - df["low"]) / df["close"].shift(1).replace(0, np.nan)
             df["amplitude"] = df["amplitude"].fillna(0)
-        if "turnover_rate" not in df.columns:
-            df["turnover_rate"] = 0.0
-
-        # ATR20
-        high_low = df["high"] - df["low"]
-        high_prev = abs(df["high"] - df["close"].shift(1))
-        low_prev = abs(df["low"] - df["close"].shift(1))
-        tr = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
-        df["atr_20"] = tr.rolling(20, min_periods=1).mean()
+        
+        if timeframe == "daily":
+            if "turnover_rate" not in df.columns:
+                df["turnover_rate"] = 0.0
+            # ATR20
+            high_low = df["high"] - df["low"]
+            high_prev = abs(df["high"] - df["close"].shift(1))
+            low_prev = abs(df["low"] - df["close"].shift(1))
+            tr = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
+            df["atr_20"] = tr.rolling(20, min_periods=1).mean()
+            
+            keep_cols = ["trade_date", "open", "high", "low", "close", "volume", 
+                         "amount", "turnover_rate", "pct_change", "amplitude", "atr_20"]
+        else:
+            # weekly, monthly, hourly
+            keep_cols = ["trade_date", "open", "high", "low", "close", "volume", 
+                         "amount", "pct_change", "amplitude"]
 
         # 删除全空行
         df = df.dropna(subset=["close"]).reset_index(drop=True)
-        return df
+        
+        # 只保留数据库表里存在的列
+        keep_cols = [c for c in keep_cols if c in df.columns]
+        return df[keep_cols]
 
     @staticmethod
     def _to_tushare_code(code: str) -> str:
