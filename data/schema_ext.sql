@@ -401,7 +401,7 @@ CREATE TABLE IF NOT EXISTS report_rc (
 CREATE TABLE IF NOT EXISTS stk_surv (
     ts_code      TEXT NOT NULL,
     surv_date    TEXT NOT NULL,
-    org_name     TEXT NOT NULL,
+    org_name     TEXT NOT NULL DEFAULT '',
     org_type     TEXT,    -- 机构类型
     rece_place   TEXT,    -- 接待地点
     rece_mode    TEXT,    -- 接待方式

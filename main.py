@@ -406,6 +406,16 @@ if __name__ == "__main__":
         # 每月宏观数据
         tushare_hub.monthly_sync()
 
+    elif cmd == "kline-full":
+        # 全量A股历史日线（增量续传），可选参数：年数，默认5年
+        years = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+        tushare_hub.sync_all_klines_full(history_years=years)
+
+    elif cmd == "kline-daily":
+        # 单日全市场日线（2次API调用），可选参数：交易日期 YYYYMMDD
+        trade_date = sys.argv[2] if len(sys.argv) > 2 else None
+        tushare_hub.sync_klines_daily(trade_date)
+
     else:
         # 默认：威科夫分析 pipeline
         for s in stocks:

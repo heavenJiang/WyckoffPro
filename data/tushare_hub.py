@@ -151,6 +151,70 @@ class TushareHub:
         logger.info("─── 月度同步 ───")
         self.sync_macro_all()
 
+    def sync_all_klines_full(self, history_years: int = 5):
+        """
+        全量A股历史日线（增量：已有数据自动续传）。
+        5497只股票 × 2次API调用/只，预计 40～60 分钟。
+        """
+        if self._pro is None:
+            logger.error("TushareHub 未初始化，跳过 kline-full")
+            return
+
+        stocks = self._get_all_ts_codes()
+        if not stocks:
+            logger.error("stock_basic 为空，请先执行 hub-full")
+            return
+
+        today = datetime.now().strftime("%Y%m%d")
+        cutoff = (datetime.now() - timedelta(days=history_years * 365)).strftime("%Y%m%d")
+        logger.info(f"═══ kline-full 开始，共 {len(stocks)} 只，起始 {cutoff} ═══")
+
+        total_rows = 0
+        skipped = 0
+        for i, ts_code in enumerate(stocks):
+            max_date = self._get_kline_max_date(ts_code)
+            if max_date and max_date >= today:
+                skipped += 1
+                continue
+            start = max_date if (max_date and max_date > cutoff) else cutoff
+            total_rows += self._fetch_and_save_klines(ts_code, start, today)
+
+            if (i + 1) % 100 == 0:
+                logger.info(f"kline-full 进度: {i+1}/{len(stocks)}，写入 {total_rows} 条，跳过 {skipped} 只")
+
+        logger.info(f"═══ kline-full 完成：写入 {total_rows} 条，跳过 {skipped} 只 ═══")
+
+    def sync_klines_daily(self, trade_date: str = None):
+        """
+        单日全市场日线（仅需 2 次 API 调用，覆盖所有A股）。
+        每日收盘后增量更新 kline_daily。
+        """
+        if self._pro is None:
+            logger.error("TushareHub 未初始化，跳过 kline-daily")
+            return
+
+        if not trade_date:
+            trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info(f"─── kline-daily {trade_date} ───")
+
+        df_daily = self._call(self._pro.daily, trade_date=trade_date)
+        if df_daily is None or df_daily.empty:
+            logger.warning(f"kline-daily {trade_date} 无数据（非交易日？）")
+            return
+
+        df_basic = self._call(self._pro.daily_basic, trade_date=trade_date,
+                              fields="ts_code,trade_date,turnover_rate")
+        if df_basic is not None and not df_basic.empty:
+            df_daily = df_daily.merge(
+                df_basic[["ts_code", "trade_date", "turnover_rate"]],
+                on=["ts_code", "trade_date"], how="left"
+            )
+        else:
+            df_daily["turnover_rate"] = None
+
+        rows = self._save_klines_df(df_daily)
+        logger.info(f"kline-daily {trade_date} 完成，写入 {rows} 条")
+
     def sync_stock_basics(self):
         """同步全量A股列表"""
         df = self._call(self._pro.stock_basic,
@@ -424,6 +488,73 @@ class TushareHub:
     # ════════════════════════════════════════════════════════════════════
     # 内部工具
     # ════════════════════════════════════════════════════════════════════
+
+    def _get_all_ts_codes(self) -> List[str]:
+        """从 stock_basic 获取全量 ts_code 列表"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute("SELECT ts_code FROM stock_basic").fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    def _get_kline_max_date(self, ts_code: str) -> Optional[str]:
+        """获取 kline_daily 中该股票最新交易日，不存在则返回 None"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT MAX(trade_date) FROM kline_daily WHERE stock_code=?",
+                    (ts_code,)
+                ).fetchone()
+            return row[0] if row and row[0] else None
+        except Exception:
+            return None
+
+    def _fetch_and_save_klines(self, ts_code: str, start: str, end: str) -> int:
+        """获取单只股票日线（含换手率）并存入 kline_daily，返回写入行数"""
+        df = self._call(self._pro.daily, ts_code=ts_code, start_date=start, end_date=end,
+                        fields="ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")
+        if df is None or df.empty:
+            return 0
+
+        df_basic = self._call(self._pro.daily_basic, ts_code=ts_code,
+                              start_date=start, end_date=end,
+                              fields="ts_code,trade_date,turnover_rate")
+        if df_basic is not None and not df_basic.empty:
+            df = df.merge(df_basic[["ts_code", "trade_date", "turnover_rate"]],
+                          on=["ts_code", "trade_date"], how="left")
+        else:
+            df["turnover_rate"] = None
+
+        return self._save_klines_df(df)
+
+    def _save_klines_df(self, df: pd.DataFrame) -> int:
+        """将 Tushare daily 格式 df 标准化后写入 kline_daily，返回行数"""
+        if df is None or df.empty:
+            return 0
+        df = df.copy()
+        df = df.rename(columns={
+            "ts_code": "stock_code",
+            "vol": "volume",
+            "pct_chg": "pct_change",
+        })
+        if "pre_close" in df.columns:
+            pre = df["pre_close"].replace(0, float("nan"))
+            df["amplitude"] = (df["high"] - df["low"]) / pre * 100
+            df.drop(columns=["pre_close"], inplace=True, errors="ignore")
+        else:
+            df["amplitude"] = None
+        df["atr_20"] = 0.0  # DataCleaner 运行时按200根K线重新计算
+        # 过滤至 schema 列
+        keep = ["stock_code", "trade_date", "open", "high", "low", "close",
+                "volume", "amount", "turnover_rate", "pct_change", "amplitude", "atr_20"]
+        df = df[[c for c in keep if c in df.columns]]
+        try:
+            self._upsert(df, "kline_daily")
+            return len(df)
+        except Exception as e:
+            logger.warning(f"kline_daily 写入失败: {e}")
+            return 0
 
     def _sync_one_stock_all(self, ts_code: str):
         """对单只股票执行全套同步"""
