@@ -8,7 +8,7 @@ import sys
 import time
 import yaml
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 from loguru import logger
 import pandas as pd
@@ -99,7 +99,8 @@ tushare_hub = TushareHub(
 
 
 
-async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> dict:
+async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily",
+                                   ai_enabled: bool = True) -> dict:
     """
     每日收盘后对单只股票的完整分析流程。
     """
@@ -111,25 +112,54 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
     
     logger.info(f"═══ 开始分析 {stock_code} ({timeframe}) ═══")
 
-    # ── L1: 数据获取 ──
-    df = storage.get_klines(stock_code, timeframe, 200)
-    if df.empty:
-        logger.warning(f"{stock_code} 无历史数据，尝试采集...")
-        df = await asyncio.to_thread(collector.update_stock, stock_code)
+    # ── L1: 数据获取（含新鲜度检查与自动增量更新）──
+    # 各周期允许的最大数据缺口天数（超过则自动补数）
+    STALE_DAYS = {"daily": 3, "weekly": 10, "monthly": 35}
+    stale_threshold = STALE_DAYS.get(timeframe, 3)
+
+    latest_date = storage.get_latest_date(stock_code, timeframe)
+    days_old = 9999
+    latest_dt = None
+    if latest_date:
+        try:
+            latest_dt = pd.to_datetime(str(latest_date))   # 兼容 YYYY-MM-DD 和 YYYYMMDD
+            days_old = (datetime.now() - latest_dt).days
+        except Exception as _e:
+            logger.warning(f"{stock_code} 日期解析失败: {latest_date!r} → {_e}")
+
+    if days_old > stale_threshold:
+        if latest_dt is not None:
+            start_fetch = (latest_dt + timedelta(days=1)).strftime("%Y%m%d")
+            logger.info(f"{stock_code} [{timeframe}] 数据截至 {latest_dt.date()}，距今 {days_old} 天，增量补数 from {start_fetch}...")
+        else:
+            logger.warning(f"{stock_code} [{timeframe}] 无本地数据，全量拉取...")
+            years = config.get("data", {}).get("history_years", 2)
+            start_fetch = (datetime.now() - timedelta(days=years * 365)).strftime("%Y%m%d")
+
+        df_new = await asyncio.to_thread(
+            collector.fetch_klines, stock_code, timeframe, start_fetch
+        )
         execution_meta["steps"].append({
-            "name": "Data Fetching",
+            "name": f"Data Sync ({timeframe})",
             **collector.last_fetch_metrics
         })
-        df = storage.get_klines(stock_code, timeframe, 200)
+        if not df_new.empty:
+            storage.save_klines(stock_code, df_new, timeframe)
+            logger.info(f"{stock_code} [{timeframe}] 补数完成，新增 {len(df_new)} 条")
+        else:
+            logger.warning(f"{stock_code} [{timeframe}] 补数失败，将使用已有数据继续分析")
     else:
         execution_meta["steps"].append({
             "name": "Data Load (Local)",
             "timestamp": datetime.now().strftime("%H:%M:%S"),
             "duration": 0.01,
-            "source": "SQLite"
+            "source": "SQLite",
         })
+
+    # 威科夫分析取最近250根K线（约1年交易日）
+    df = storage.get_klines(stock_code, timeframe, 250)
     if df.empty:
-        return {"error": "无法获取数据"}
+        return {"error": f"无法获取 {stock_code} 数据，请检查数据源连通性"}
 
     df = cleaner.clean(df)
     thresholds = adaptive_thresholds.calc(df)
@@ -188,66 +218,7 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
         daily_conf=getattr(phase_state, "confidence", 0.5),
     )
 
-    # ── L2-F: 信号证伪（Prompt B）──
-    signal_falsifications = {}
-    falsi_min_lik = config.get("ai", {}).get("falsification", {}).get("signal_falsify_min_likelihood", 0.50)
-    critical_types = set(config.get("ai", {}).get("falsification", {}).get("signal_falsify_critical_types", []))
-
-    for sig in signals:
-        should_falsi = (sig.likelihood >= falsi_min_lik or sig.signal_type in critical_types)
-        if should_falsi and falsification_scheduler.should_falsify(stock_code, "DAILY"):
-            sig_dict = sig.to_dict()
-            sig_dict["original_likelihood"] = sig.likelihood
-            result = falsification_engine.falsify_signal(stock_code, sig, df, phase_state, context)
-            execution_meta["steps"].append({
-                "name": f"Signal Falsify ({sig.signal_type})",
-                **llm.last_call_metrics
-            })
-            if result:
-                signal_falsifications[sig.signal_type] = {**result, "original_likelihood": sig.likelihood}
-
-    # ── L2-F: 阶段证伪（Prompt A，条件触发）──
-    phase_falsification = None
-    should_phase_falsi = (
-        getattr(phase_state, "duration_days", 0) >= 30 or
-        ce_result.get("alert_level") in ("YELLOW", "ORANGE", "RED") or
-        falsification_scheduler.should_falsify(stock_code, "DAILY")
-    )
-    if should_phase_falsi:
-        phase_falsification = falsification_engine.falsify_phase(stock_code, phase_state, df, context)
-        execution_meta["steps"].append({
-            "name": "Phase Falsify",
-            **llm.last_call_metrics
-        })
-        if phase_falsification:
-            falsification_scheduler.record(stock_code, phase_falsification.get("falsification_result", ""))
-
-    # ── L2-F: 叙事一致性（Prompt C）──
-    narrative_check = falsification_engine.check_narrative(
-        stock_code, phase_state, chain, sd_score, sd_breakdown,
-        ce_result, mtf_alignment
-    )
-    execution_meta["steps"].append({
-        "name": "Narrative Check (Prompt C)",
-        **llm.last_call_metrics
-    })
-
-    # ── 聚合证伪结果 ──
-    adj = falsification_aggregator.process_results(
-        stock_code, phase_falsification, signal_falsifications, narrative_check
-    )
-
-    # ── 应用调整 ──
-    phase_fsm.adjust_confidence(stock_code, adj["phase_confidence_delta"], timeframe)
-    if adj["counter_evidence_delta"] != 0:
-        counter_tracker.adjust_score(stock_code, adj["counter_evidence_delta"], "AI", "AI证伪聚合调整")
-
-    # ── 二次紧急反转检查 ──
-    final_ce = counter_tracker.get_state(stock_code)
-    if final_ce.score >= config.get("emergency_reversal", {}).get("red_reversal_threshold", 71):
-        logger.warning(f"[{stock_code}] 🚨 AI证伪后二次触发紧急反转检查，积分={final_ce.score:.1f}")
-
-    # ── L4: 生成投资建议 ──
+    # ── L4: 量化评分（规则层，两种模式共用）──
     qs = build_quant_scores(phase_state, chain, nine_result, sd_score, mtf_alignment, ce_result)
     user_ctx = UserContext()
     pos = position_tracker.get_position(stock_code)
@@ -258,9 +229,92 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
             current_price=float(df.iloc[-1].get("close", 0))
         )
 
-    advice = advisor.generate_advice(stock_code, qs, adj, user_ctx, channel, pnf_targets)
+    if ai_enabled:
+        # ── L2-F: 信号证伪（Prompt B）──
+        signal_falsifications = {}
+        falsi_min_lik = config.get("ai", {}).get("falsification", {}).get("signal_falsify_min_likelihood", 0.50)
+        critical_types = set(config.get("ai", {}).get("falsification", {}).get("signal_falsify_critical_types", []))
 
-    # ── 保存建议 ──
+        for sig in signals:
+            should_falsi = (sig.likelihood >= falsi_min_lik or sig.signal_type in critical_types)
+            if should_falsi and falsification_scheduler.should_falsify(stock_code, "DAILY"):
+                sig_dict = sig.to_dict()
+                sig_dict["original_likelihood"] = sig.likelihood
+                _r = falsification_engine.falsify_signal(stock_code, sig, df, phase_state, context)
+                execution_meta["steps"].append({
+                    "name": f"Signal Falsify ({sig.signal_type})",
+                    **llm.last_call_metrics
+                })
+                if _r:
+                    signal_falsifications[sig.signal_type] = {**_r, "original_likelihood": sig.likelihood}
+
+        # ── L2-F: 阶段证伪（Prompt A）──
+        phase_falsification = None
+        should_phase_falsi = (
+            getattr(phase_state, "duration_days", 0) >= 30 or
+            ce_result.get("alert_level") in ("YELLOW", "ORANGE", "RED") or
+            falsification_scheduler.should_falsify(stock_code, "DAILY")
+        )
+        if should_phase_falsi:
+            phase_falsification = falsification_engine.falsify_phase(stock_code, phase_state, df, context)
+            execution_meta["steps"].append({"name": "Phase Falsify", **llm.last_call_metrics})
+            if phase_falsification:
+                falsification_scheduler.record(stock_code, phase_falsification.get("falsification_result", ""))
+
+        # ── L2-F: 叙事一致性（Prompt C）──
+        narrative_check = falsification_engine.check_narrative(
+            stock_code, phase_state, chain, sd_score, sd_breakdown, ce_result, mtf_alignment
+        )
+        execution_meta["steps"].append({"name": "Narrative Check", **llm.last_call_metrics})
+
+        # ── 聚合 & 应用调整 ──
+        adj = falsification_aggregator.process_results(
+            stock_code, phase_falsification, signal_falsifications, narrative_check
+        )
+        phase_fsm.adjust_confidence(stock_code, adj["phase_confidence_delta"], timeframe)
+        if adj["counter_evidence_delta"] != 0:
+            counter_tracker.adjust_score(stock_code, adj["counter_evidence_delta"], "AI", "AI证伪聚合调整")
+
+        final_ce = counter_tracker.get_state(stock_code)
+        if final_ce.score >= config.get("emergency_reversal", {}).get("red_reversal_threshold", 71):
+            logger.warning(f"[{stock_code}] 🚨 AI证伪后触发紧急反转，积分={final_ce.score:.1f}")
+
+        advice = advisor.generate_advice(stock_code, qs, adj, user_ctx, channel, pnf_targets)
+
+        # ── 保存证伪日志 ──
+        if phase_falsification or signal_falsifications:
+            storage.save_falsification_log({
+                "stock_code": stock_code,
+                "falsification_type": "DAILY",
+                "result": phase_falsification.get("falsification_result", "N/A") if phase_falsification else "NOT_RUN",
+                "detail": {"phase": phase_falsification, "signals": signal_falsifications, "narrative": narrative_check},
+                "adjustments_applied": adj,
+                "token_used": llm.daily_used,
+            })
+
+        # AI证伪摘要（用于UI展示）
+        falsification_summary = {
+            "signal_results": {k: v.get("falsification_result") for k, v in signal_falsifications.items()},
+            "phase_result":   phase_falsification.get("falsification_result") if phase_falsification else None,
+            "narrative":      narrative_check.get("overall_consistency") if narrative_check else None,
+            "conf_delta":     adj.get("phase_confidence_delta", 0),
+            "ce_delta":       adj.get("counter_evidence_delta", 0),
+            "gate":           adj.get("advice_gate", "PASS"),
+        }
+    else:
+        # ── 纯规则模式：跳过所有 LLM 调用 ──
+        adj = {
+            "phase_confidence_delta": 0, "counter_evidence_delta": 0,
+            "advice_gate": "PASS", "alerts": [],
+            "phase_falsification_summary": "规则模式，未启用AI",
+        }
+        advice = advisor._rule_based_advice(stock_code, qs, adj, user_ctx, channel, pnf_targets)
+        advice["generated_by"] = "RULE_ENGINE"
+        advice["alerts"] = []
+        falsification_summary = None
+        execution_meta["steps"].append({"name": "Rule Engine Advice", "duration": 0, "source": "rules"})
+
+    # ── 保存建议（两种模式都存，用 ai_enabled 区分）──
     advice_id = storage.save_advice({
         "stock_code": stock_code,
         "advice_type": advice.get("advice_type", "WAIT"),
@@ -278,20 +332,19 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
     })
     advice["id"] = advice_id
 
-    # ── 保存证伪日志 ──
-    if phase_falsification or signal_falsifications:
-        storage.save_falsification_log({
-            "stock_code": stock_code,
-            "falsification_type": "DAILY",
-            "result": phase_falsification.get("falsification_result", "N/A") if phase_falsification else "NOT_RUN",
-            "detail": {
-                "phase": phase_falsification,
-                "signals": signal_falsifications,
-                "narrative": narrative_check,
-            },
-            "adjustments_applied": adj,
-            "token_used": llm.daily_used,
-        })
+    # ── 生成交易计划（仅 AI 模式或 BUY 类建议）──
+    if ai_enabled or advice.get("advice_type") in ("BUY", "STRONG_BUY"):
+        plan_gen.generate(
+            stock_code=stock_code,
+            advice=advice,
+            channel_levels=channel,
+            pnf_targets=pnf_targets,
+            portfolio_value=config.get("risk", {}).get("portfolio_value", 0),
+        )
+
+    end_time = time.time()
+    execution_meta["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    execution_meta["total_duration"] = round(end_time - start_time, 2)
 
     end_time = time.time()
     execution_meta["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -320,9 +373,35 @@ async def daily_analysis_pipeline(stock_code: str, timeframe: str = "daily") -> 
             "cr_lower": channel.lower,
         },
         "alerts": adj.get("alerts", []),
+        "ai_enabled": ai_enabled,
+        "falsification_summary": falsification_summary,
     }
 
-    logger.success(f"===完成分析 {stock_code}: {advice.get('advice_type')} ({advice.get('confidence')}%) ===")
+    # ── 保存分析快照 ──
+    storage.save_analysis_snapshot({
+        "stock_code":        stock_code,
+        "timeframe":         timeframe,
+        "trade_date":        result["trade_date"],
+        "phase_code":        result["phase"],
+        "phase_confidence":  result["phase_confidence"],
+        "advice_type":       advice.get("advice_type", "WAIT"),
+        "confidence":        advice.get("confidence", 0),
+        "advice_id":         advice_id,
+        "quant_total":       result["quant_total"],
+        "sd_score":          result["sd_score"],
+        "counter_score":     result["counter_score"],
+        "alert_level":       result["alert_level"],
+        "nine_tests_passed": result["nine_tests_passed"],
+        "chain_completion":  result["chain_completion"],
+        "signals_json":      result["signals"],
+        "start_time":        execution_meta.get("start_time"),
+        "total_duration":    execution_meta.get("total_duration"),
+        "steps_json":        execution_meta.get("steps", []),
+        "ai_enabled":        1 if ai_enabled else 0,
+    })
+
+    mode = "AI增强" if ai_enabled else "纯规则"
+    logger.success(f"[{mode}] 完成分析 {stock_code}: {advice.get('advice_type')} ({advice.get('confidence')}%)")
     return result
 
 

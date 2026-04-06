@@ -2,19 +2,16 @@
 ui/components/signal_panel.py — 信号面板组件
 """
 import streamlit as st
-import pandas as pd
-
+import html as _html
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from ui.components.glossary import GLOSSARY
+from ui.components.translations import CN
 
 SIGNAL_EMOJI = {
     "SC": "🔴", "AR": "🟠", "ST": "🟡", "Spring": "🟢",
     "SOS": "💚", "SOW": "🔻", "UT": "🟣", "UTAD": "🔮",
     "JOC": "💫", "LPSY": "🔺", "VDB": "💧", "BC": "🔵", "PSY": "⚪",
-}
-
-SIGNAL_DESC = {
-    "SC": "卖出高潮", "AR": "自动反弹", "ST": "二次测试", "Spring": "弹簧/震仓",
-    "SOS": "力量信号", "SOW": "弱点信号", "UT": "向上试探", "UTAD": "末期试探",
-    "JOC": "跳出冰点", "LPSY": "最后供应点", "VDB": "低量测试", "BC": "买入高潮", "PSY": "初步供给",
 }
 
 
@@ -25,57 +22,52 @@ def render_signal_panel(signals: list, title: str = "信号检测"):
         st.caption("暂无信号")
         return
 
-    # 排序：似然度从高到低
     sigs = sorted(signals, key=lambda s: s.get("likelihood", 0), reverse=True)
 
     for sig in sigs:
         sig_type = sig.get("signal_type", "?")
-        lik = sig.get("likelihood", 0)
+        lik      = sig.get("likelihood", 0)
         strength = sig.get("strength", 1)
-        date = sig.get("signal_date", "")[:10]
-        price = sig.get("trigger_price", 0)
-        falsi = sig.get("ai_falsification_result", None)
-        emoji = SIGNAL_EMOJI.get(sig_type, "⚡")
-        desc = SIGNAL_DESC.get(sig_type, sig_type)
+        sig_date = sig.get("signal_date", "")[:10]
+        price    = sig.get("trigger_price", 0)
+        falsi    = sig.get("ai_falsification_result", None)
+        emoji    = SIGNAL_EMOJI.get(sig_type, "⚡")
+        desc_cn  = CN.signal(sig_type)
 
-        # 似然度颜色
-        if lik >= 0.75:
-            lik_color = "#2ecc71"
-        elif lik >= 0.50:
-            lik_color = "#f39c12"
-        else:
-            lik_color = "#e74c3c"
+        lik_color = "#2ecc71" if lik >= 0.75 else ("#f39c12" if lik >= 0.50 else "#e74c3c")
 
-        # 证伪结果标记
         falsi_badge = ""
-        if falsi == "GENUINE":
-            falsi_badge = '<span style="color:#2ecc71; font-size:11px;">✅AI确认</span>'
-        elif falsi == "SUSPECT":
-            falsi_badge = '<span style="color:#f39c12; font-size:11px;">⚠️AI可疑</span>'
-        elif falsi == "FALSE":
-            falsi_badge = '<span style="color:#e74c3c; font-size:11px;">❌AI否定</span>'
+        if falsi:
+            falsi_cn  = CN.verdict(falsi)
+            falsi_clr = "#2ecc71" if "确认" in falsi_cn else ("#f39c12" if "可疑" in falsi_cn else "#e74c3c")
+            falsi_badge = f'&nbsp;<span style="color:{falsi_clr};font-size:10px;">{_html.escape(falsi_cn)}</span>'
 
-        strength_stars = "⭐" * strength
+        strength_stars = "⭐" * max(1, min(strength or 1, 5))
 
-        st.markdown(f"""
-        <div style="border: 1px solid #333; border-radius: 8px; padding: 10px 14px;
-                    margin-bottom: 6px; background: #1a1a1a;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <span style="font-size: 16px;">{emoji}</span>
-                    <span style="color: #e0e0e0; font-weight: 700; margin-left: 6px;">{sig_type}</span>
-                    <span style="color: #888; font-size: 12px; margin-left: 6px;">{desc}</span>
-                    <span style="margin-left: 8px;">{falsi_badge}</span>
-                </div>
-                <div style="text-align: right; font-size: 12px; color: #aaa;">
-                    {date} · ¥{price:.2f} · {strength_stars}
-                </div>
-            </div>
-            <div style="margin-top: 6px; background: #2a2a2a; border-radius: 4px; height: 5px;">
-                <div style="width: {lik*100:.0f}%; height: 100%; background: {lik_color}; border-radius: 4px;"></div>
-            </div>
-            <div style="color: {lik_color}; font-size: 12px; margin-top: 3px;">
-                似然度 {lik:.0%}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # 转义 GLOSSARY 中含 >/< 的内容（避免破坏 title 属性 HTML 结构）
+        _raw_def = GLOSSARY.get(sig_type, "").replace("\n", " | ")
+        definition = _html.escape(_raw_def, quote=True)
+        def_tip = f' title="{definition}"' if definition else ""
+
+        # 用 <span style="display:inline-block"> 代替裸 <div>，避免 Streamlit 剥离无属性 div
+        st.markdown(
+            f'<div style="border:1px solid #2d2d2d;border-radius:8px;padding:8px 12px;'
+            f'margin-bottom:5px;background:#161616;">'
+            f'<span style="display:flex;justify-content:space-between;align-items:center;">'
+            f'<span style="flex:1;overflow:hidden;">'
+            f'<span style="font-size:14px;">{emoji}</span>'
+            f'<span style="color:#e0e0e0;font-weight:700;font-size:13px;margin-left:5px;">{_html.escape(desc_cn)}</span>'
+            f'<span{def_tip} style="color:#6b7280;font-size:11px;margin-left:3px;border-bottom:1px dashed #444;cursor:help;">({_html.escape(sig_type)})</span>'
+            f'{falsi_badge}'
+            f'</span>'
+            f'<span style="white-space:nowrap;font-size:11px;color:#9ca3af;margin-left:8px;">'
+            f'{sig_date}&nbsp;·&nbsp;¥{price:.2f}&nbsp;·&nbsp;{strength_stars}'
+            f'</span>'
+            f'</span>'
+            f'<div style="margin-top:5px;background:#2a2a2a;border-radius:3px;height:3px;">'
+            f'<div style="width:{lik*100:.0f}%;height:100%;background:{lik_color};border-radius:3px;"></div>'
+            f'</div>'
+            f'<span style="color:{lik_color};font-size:11px;margin-top:2px;display:block;">似然度 {lik:.0%}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )

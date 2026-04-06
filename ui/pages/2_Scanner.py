@@ -5,9 +5,12 @@ import streamlit as st
 import sys
 import os
 import asyncio
+import pandas as pd
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from main import daily_analysis_pipeline, storage
+from main import daily_analysis_pipeline, storage, collector
+from ui.components.glossary import tip, md_tip
 
 st.set_page_config(page_title="Scanner - WyckoffPro", page_icon="🔍")
 st.title("🔍 每日信号扫描")
@@ -28,6 +31,24 @@ if st.button("🚀 开始全量扫描 (Daily Pipeline)", type="primary"):
             status_text.text(f"正在扫描: {code} {name} ... ({i+1}/{len(wl)})")
             
             try:
+                # 数据新鲜度检查与同步
+                _raw = storage.get_latest_date(code, "daily")
+                _days = 9999
+                _ldt  = None
+                if _raw:
+                    try:
+                        _ldt  = pd.to_datetime(str(_raw))
+                        _days = (date.today() - _ldt.date()).days
+                    except Exception:
+                        pass
+                if _days > 3:
+                    _sf = ((_ldt + timedelta(days=1)).strftime("%Y%m%d")
+                           if _ldt else (date.today() - timedelta(days=730)).strftime("%Y%m%d"))
+                    _dfn = collector.fetch_klines(code, "daily", _sf)
+                    if not _dfn.empty:
+                        storage.save_klines(code, _dfn, "daily")
+                        status_text.text(f"已同步 {code} 新增 {len(_dfn)} 条，继续分析…")
+
                 # 运行全量分析 pipeline
                 res = asyncio.run(daily_analysis_pipeline(code))
                 if "error" in res:
@@ -66,11 +87,22 @@ if st.button("🚀 开始全量扫描 (Daily Pipeline)", type="primary"):
                     if r.get("alerts"):
                         for alert in r.get("alerts"):
                             st.warning(f"⚠️ {alert.get('message')}")
-                    
+
                     # 显示步骤详情
                     if meta.get("steps"):
                         cols = st.columns(len(meta["steps"]))
                         for j, step in enumerate(meta["steps"]):
                             cols[j].caption(f"{step['name']}\n{step['duration']}s")
-                            
+
+                    # 显示检测到的信号（带术语解释）
+                    if r.get("signals"):
+                        sig_html = " &nbsp;|&nbsp; ".join(md_tip(s["signal_type"]) for s in r["signals"])
+                        st.markdown(f"**检测到的信号：** {sig_html}", unsafe_allow_html=True)
+
                     st.write(r.get("advice", {}).get("summary", ""))
+
+        # 信号术语词汇表
+        with st.expander("📖 威科夫信号术语说明"):
+            signal_terms = ["SC", "AR", "ST", "Spring", "SOS", "SOW", "UT", "UTAD", "JOC", "LPSY", "VDB", "BC", "PSY"]
+            for term in signal_terms:
+                st.markdown(f"**{term}** — {tip(term)}")

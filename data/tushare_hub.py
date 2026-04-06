@@ -499,14 +499,18 @@ class TushareHub:
             return []
 
     def _get_kline_max_date(self, ts_code: str) -> Optional[str]:
-        """获取 kline_daily 中该股票最新交易日，不存在则返回 None"""
+        """获取 kline_daily 中该股票最新交易日，统一返回 YYYYMMDD 格式（供 Tushare API 使用）"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 row = conn.execute(
                     "SELECT MAX(trade_date) FROM kline_daily WHERE stock_code=?",
                     (ts_code,)
                 ).fetchone()
-            return row[0] if row and row[0] else None
+            raw = row[0] if row and row[0] else None
+            if not raw:
+                return None
+            # 统一转换为 YYYYMMDD（无论 DB 中存的是 YYYY-MM-DD 还是 YYYYMMDD）
+            return pd.to_datetime(str(raw)).strftime("%Y%m%d")
         except Exception:
             return None
 
@@ -538,6 +542,11 @@ class TushareHub:
             "vol": "volume",
             "pct_chg": "pct_change",
         })
+        # 日期统一转为 YYYY-MM-DD（Tushare 返回 YYYYMMDD）
+        if "trade_date" in df.columns:
+            df["trade_date"] = pd.to_datetime(df["trade_date"].astype(str),
+                                              format="mixed", errors="coerce").dt.strftime("%Y-%m-%d")
+            df = df.dropna(subset=["trade_date"])
         if "pre_close" in df.columns:
             pre = df["pre_close"].replace(0, float("nan"))
             df["amplitude"] = (df["high"] - df["low"]) / pre * 100

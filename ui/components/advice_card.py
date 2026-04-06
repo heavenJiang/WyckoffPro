@@ -2,17 +2,20 @@
 ui/components/advice_card.py — 投资建议卡片组件
 """
 import streamlit as st
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from ui.components.translations import CN
 
-
+# 组件专用样式（颜色/图标，标签由 CN.advice() 提供）
 ADVICE_STYLES = {
-    "STRONG_BUY":  {"color": "#00e676", "bg": "#0a2a0a", "icon": "🚀", "label": "强烈买入"},
-    "BUY":         {"color": "#66bb6a", "bg": "#1a2a1a", "icon": "📈", "label": "买入"},
-    "WATCH":       {"color": "#29b6f6", "bg": "#0a1a2a", "icon": "👁", "label": "关注"},
-    "HOLD":        {"color": "#78909c", "bg": "#1a2030", "icon": "🤚", "label": "持有"},
-    "REDUCE":      {"color": "#ffa726", "bg": "#2a1a0a", "icon": "📉", "label": "减仓"},
-    "SELL":        {"color": "#ef5350", "bg": "#2a0a0a", "icon": "🔻", "label": "卖出"},
-    "STRONG_SELL": {"color": "#ff1744", "bg": "#3a0a0a", "icon": "💥", "label": "强烈卖出"},
-    "WAIT":        {"color": "#78909c", "bg": "#1a1a1a", "icon": "⏳", "label": "等待"},
+    "STRONG_BUY":  {"color": "#00e676", "bg": "#0a2a0a", "icon": "🚀"},
+    "BUY":         {"color": "#66bb6a", "bg": "#1a2a1a", "icon": "📈"},
+    "WATCH":       {"color": "#29b6f6", "bg": "#0a1a2a", "icon": "👁"},
+    "HOLD":        {"color": "#78909c", "bg": "#1a2030", "icon": "🤚"},
+    "REDUCE":      {"color": "#ffa726", "bg": "#2a1a0a", "icon": "📉"},
+    "SELL":        {"color": "#ef5350", "bg": "#2a0a0a", "icon": "🔻"},
+    "STRONG_SELL": {"color": "#ff1744", "bg": "#3a0a0a", "icon": "💥"},
+    "WAIT":        {"color": "#78909c", "bg": "#1a1a1a", "icon": "⏳"},
 }
 
 
@@ -20,6 +23,7 @@ def render_advice_card(advice: dict):
     """渲染投资建议卡片"""
     advice_type = advice.get("advice_type", "WAIT")
     style = ADVICE_STYLES.get(advice_type, ADVICE_STYLES["WAIT"])
+    label = CN.advice(advice_type)
     conf = advice.get("confidence", 0)
     summary = advice.get("summary", "暂无建议")
     reasoning = advice.get("reasoning", "")
@@ -34,7 +38,7 @@ def render_advice_card(advice: dict):
         <div style="display: flex; justify-content: space-between; align-items: flex-start;">
             <div>
                 <div style="color: {style['color']}; font-size: 28px; font-weight: 800;">
-                    {style['icon']} {style['label']}
+                    {style['icon']} {label}
                 </div>
                 <div style="color: #e0e0e0; font-size: 16px; margin-top: 6px;">
                     {summary}

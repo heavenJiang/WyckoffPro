@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS north_flow (
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_kline_daily_code ON kline_daily(stock_code);
 CREATE INDEX IF NOT EXISTS idx_wyckoff_signal_code ON wyckoff_signal(stock_code, signal_date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wyckoff_signal_unique ON wyckoff_signal(stock_code, signal_date, signal_type, timeframe);
 CREATE INDEX IF NOT EXISTS idx_wyckoff_phase_code ON wyckoff_phase(stock_code);
 CREATE INDEX IF NOT EXISTS idx_counter_evidence_code ON counter_evidence(stock_code, is_active);
 CREATE INDEX IF NOT EXISTS idx_advice_code ON advice(stock_code, created_at);
@@ -225,3 +226,35 @@ CREATE TABLE IF NOT EXISTS backtest_result (
 );
 
 CREATE INDEX IF NOT EXISTS idx_backtest_result_code ON backtest_result(stock_code, run_at);
+
+-- 分析快照（每次 pipeline 运行的完整聚合记录）
+CREATE TABLE IF NOT EXISTS analysis_snapshot (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code         TEXT NOT NULL,
+    run_at             TEXT NOT NULL,          -- pipeline 执行时间
+    timeframe          TEXT DEFAULT 'daily',
+    trade_date         TEXT,                   -- 最新 K 线日期
+    -- 阶段
+    phase_code         TEXT,
+    phase_confidence   REAL,
+    -- 建议
+    advice_type        TEXT,
+    confidence         REAL,
+    advice_id          INTEGER,                -- FK → advice.id
+    -- 量化评分
+    quant_total        REAL,
+    sd_score           REAL,
+    counter_score      REAL,
+    alert_level        TEXT,
+    nine_tests_passed  INTEGER,
+    chain_completion   REAL,
+    -- 本次检测到的信号（JSON 数组）
+    signals_json       TEXT,
+    -- 执行元数据
+    start_time         TEXT,
+    total_duration     REAL,
+    steps_json         TEXT,
+    -- 双轨标记：1=AI增强模式，0=纯规则模式
+    ai_enabled         INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_snapshot ON analysis_snapshot(stock_code, run_at);

@@ -5,6 +5,7 @@ ai/advisor.py — L4: AI 投资建议生成器
 """
 from __future__ import annotations
 import os
+import re
 from dataclasses import dataclass
 from typing import Dict, Optional
 from loguru import logger
@@ -12,6 +13,14 @@ from loguru import logger
 from ai.falsification_aggregator import downgrade_advice
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+
+
+def _safe_format(template: str, **kwargs) -> str:
+    """Replace {identifier} placeholders only; leave JSON braces untouched."""
+    def replace(m):
+        key = m.group(1)
+        return str(kwargs[key]) if key in kwargs else m.group(0)
+    return re.sub(r'\{([A-Za-z_]\w*)\}', replace, template)
 
 
 def _load_template(filename: str) -> str:
@@ -131,7 +140,8 @@ class AIAdvisor:
         # 九大检验格式化
         nine_tests_str = qs.nine_tests_detail or f"通过 {qs.nine_tests_passed}/9 项"
 
-        prompt = template.format(
+        prompt = _safe_format(
+            template,
             stock_code=stock_code,
             market_alignment=qs.market_alignment,
             phase_score=qs.phase_score,

@@ -6,6 +6,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
+import numpy as np
 
 
 PHASE_COLORS = {
@@ -99,23 +100,47 @@ def render_kline_chart(df: pd.DataFrame, signals: list = None, phase_state=None,
     if signals:
         sig_df = pd.DataFrame(signals)
         if not sig_df.empty:
-            for sig_type in sig_df["signal_type"].unique():
-                sub = sig_df[sig_df["signal_type"] == sig_type]
+            # 合并价格数据，统一处理
+            sig_df = sig_df.merge(
+                df[["trade_date", "low", "high"]],
+                left_on="signal_date", right_on="trade_date", how="left"
+            ).dropna(subset=["low", "high"])
+
+            BUY_SIDE = {"SC", "Spring", "AR", "ST", "SOS", "VDB", "JOC"}
+
+            # 按日期+信号类型排序，保证同天多信号偏移顺序固定
+            sig_df = sig_df.sort_values(["signal_date", "signal_type"]).reset_index(drop=True)
+
+            # 记录每个(日期, 方向)已放置的信号数，用于逐步偏移
+            _slot: dict = {}
+            y_positions = []
+            for _, row in sig_df.iterrows():
+                date = str(row["signal_date"])
+                is_buy = row["signal_type"] in BUY_SIDE
+                key = (date, is_buy)
+                n = _slot.get(key, 0)
+                _slot[key] = n + 1
+                step = 0.014 * n          # 每多一个信号偏移1.4%
+                if is_buy:
+                    y_positions.append(float(row["low"]) * (0.995 - step))
+                else:
+                    y_positions.append(float(row["high"]) * (1.005 + step))
+            sig_df["_y"] = y_positions
+
+            # 按信号类型分组渲染（legend显示）
+            for sig_type, sub in sig_df.groupby("signal_type"):
                 color = SIGNAL_COLORS.get(sig_type, "#ffffff")
-                # 与K线数据做连接获取价格
-                sub_merged = sub.merge(
-                    df[["trade_date", "low", "high"]],
-                    left_on="signal_date", right_on="trade_date", how="left"
-                )
-                y_pos = sub_merged["low"] * 0.995 if sig_type in ("SC", "Spring", "AR", "ST", "SOS", "VDB") \
-                    else sub_merged["high"] * 1.005
+                is_buy = sig_type in BUY_SIDE
                 fig.add_trace(go.Scatter(
-                    x=sub_merged["signal_date"],
-                    y=y_pos,
+                    x=sub["signal_date"],
+                    y=sub["_y"],
                     mode="markers+text",
-                    marker=dict(color=color, size=10, symbol="triangle-up" if sig_type in ("Spring", "SOS", "JOC") else "triangle-down"),
-                    text=[sig_type] * len(sub_merged),
-                    textposition="bottom center",
+                    marker=dict(
+                        color=color, size=10,
+                        symbol="triangle-up" if is_buy else "triangle-down",
+                    ),
+                    text=[sig_type] * len(sub),
+                    textposition="bottom center" if is_buy else "top center",
                     textfont=dict(size=9, color=color),
                     name=sig_type,
                 ), row=1, col=1)
@@ -136,12 +161,16 @@ def render_kline_chart(df: pd.DataFrame, signals: list = None, phase_state=None,
         ), row=3, col=1)
 
     # ── 布局 ──
+    # 默认显示最近 120 根 K 线，用户可拖动查看更早数据
+    n_total = len(df)
+    n_default = min(120, n_total)
+    x_range = [n_total - n_default - 0.5, n_total - 0.5]
+
     fig.update_layout(
         height=height,
         paper_bgcolor="#0e1117",
         plot_bgcolor="#0e1117",
         font=dict(color="#e0e0e0"),
-        xaxis_rangeslider_visible=False,
         showlegend=True,
         legend=dict(
             bgcolor="#1a1a2e", bordercolor="#444",
@@ -149,14 +178,136 @@ def render_kline_chart(df: pd.DataFrame, signals: list = None, phase_state=None,
             font=dict(size=10)
         ),
         margin=dict(l=40, r=40, t=30, b=20),
+        dragmode="pan",   # 拖动=平移，滚轮=缩放
+        # category 轴：消除非交易日空隙，三图保持同步
+        xaxis=dict(
+            type="category",
+            range=x_range,
+            rangeslider=dict(visible=False),
+            gridcolor="#262626", zeroline=False,
+            showspikes=True, spikecolor="#555",
+            tickangle=-45, nticks=12,
+        ),
+        xaxis2=dict(
+            type="category",
+            range=x_range,
+            rangeslider=dict(visible=False),
+            gridcolor="#262626", zeroline=False,
+            showspikes=True, spikecolor="#555",
+        ),
+        xaxis3=dict(
+            type="category",
+            range=x_range,
+            rangeslider=dict(visible=False),
+            gridcolor="#262626", zeroline=False,
+            showspikes=True, spikecolor="#555",
+        ),
     )
     for i in range(1, 4):
-        fig.update_xaxes(
-            gridcolor="#262626", zeroline=False, row=i, col=1,
-            showspikes=True, spikecolor="#555"
-        )
-        fig.update_yaxes(
-            gridcolor="#262626", zeroline=False, row=i, col=1
-        )
+        fig.update_yaxes(gridcolor="#262626", zeroline=False, row=i, col=1)
 
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={
+        "displayModeBar": True,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+        "scrollZoom": True,
+        "doubleClick": "reset",
+    })
+    _render_kline_insight(df, signals, phase_state, channel)
+
+
+def _render_kline_insight(df: pd.DataFrame, signals, phase_state, channel):
+    """基于实际数据动态生成图表走势解读"""
+
+    last   = df.iloc[-1]
+    close  = float(last.get("close", 0) or 0)
+    volume = float(last.get("volume", 0) or 0)
+
+    ma20_series = df["close"].rolling(20, min_periods=5).mean()
+    ma20 = float(ma20_series.iloc[-1]) if not ma20_series.empty and not pd.isna(ma20_series.iloc[-1]) else None
+    vol_avg20 = float(df["volume"].tail(20).mean()) if len(df) >= 5 else 0
+
+    # ── K线趋势判断 ──
+    if ma20 and ma20 > 0:
+        diff_pct = (close - ma20) / ma20 * 100
+        if diff_pct > 2:
+            trend_icon, trend_text, trend_color = "↑", f"多头结构：收盘价 {close:.2f} 高于 MA20（{ma20:.2f}）{diff_pct:.1f}%，上升趋势", "#2ecc71"
+        elif diff_pct < -2:
+            trend_icon, trend_text, trend_color = "↓", f"空头结构：收盘价 {close:.2f} 低于 MA20（{ma20:.2f}）{abs(diff_pct):.1f}%，下降趋势", "#e74c3c"
+        else:
+            trend_icon, trend_text, trend_color = "→", f"震荡结构：收盘价 {close:.2f} 贴近 MA20（{ma20:.2f}），方向待确认", "#f39c12"
+    else:
+        trend_icon, trend_text, trend_color = "—", "数据不足，无法判断趋势", "#888"
+
+    # ── 成交量分析 ──
+    if vol_avg20 > 0:
+        vol_ratio = volume / vol_avg20
+        if vol_ratio >= 2.0:
+            vol_icon, vol_text, vol_color = "🔥", f"显著放量（{vol_ratio:.1f}x 均量），需结合价格方向判断主动性", "#ef5350"
+        elif vol_ratio >= 1.3:
+            vol_icon, vol_text, vol_color = "📈", f"温和放量（{vol_ratio:.1f}x 均量），量价配合需观察", "#f39c12"
+        elif vol_ratio <= 0.5:
+            vol_icon, vol_text, vol_color = "💧", f"明显缩量（{vol_ratio:.1f}x 均量），观望情绪浓，可能为 VDB 蓄力信号", "#26a69a"
+        else:
+            vol_icon, vol_text, vol_color = "📊", f"量能正常（{vol_ratio:.1f}x 均量），无异常放缩量", "#9ca3af"
+    else:
+        vol_icon, vol_text, vol_color = "—", "成交量数据不足", "#888"
+
+    # ── ATR 分析 ──
+    atr_text, atr_color = "", "#9ca3af"
+    if "atr_20" in df.columns:
+        atr_last = float(last.get("atr_20", 0) or 0)
+        atr_avg  = float(df["atr_20"].tail(60).mean()) if len(df) >= 10 else 0
+        if atr_last > 0 and atr_avg > 0:
+            atr_ratio = atr_last / atr_avg
+            if atr_ratio > 1.4:
+                atr_text  = f"ATR 偏高（{atr_last:.2f}，近期均值 {atr_avg:.2f}），波动加剧，注意仓位控制"
+                atr_color = "#ef5350"
+            elif atr_ratio < 0.65:
+                atr_text  = f"ATR 收缩（{atr_last:.2f}，近期均值 {atr_avg:.2f}），波动蓄力，可能为弹簧/蓄积前兆"
+                atr_color = "#2ecc71"
+            else:
+                atr_text  = f"ATR 正常（{atr_last:.2f}），波动处于常规水平"
+
+    # ── 通道位置 ──
+    channel_text, channel_color = "", "#9ca3af"
+    if channel:
+        sup = getattr(channel, "support_1", 0) or 0
+        res = getattr(channel, "resistance_1", 0) or 0
+        if sup > 0 and res > sup:
+            pos_pct = (close - sup) / (res - sup) * 100
+            if pos_pct >= 80:
+                channel_text  = f"价格处于通道上部（{pos_pct:.0f}%），接近阻力 {res:.2f}，注意压力"
+                channel_color = "#ef5350"
+            elif pos_pct <= 20:
+                channel_text  = f"价格处于通道下部（{pos_pct:.0f}%），接近支撑 {sup:.2f}，关注止跌信号"
+                channel_color = "#26a69a"
+            else:
+                channel_text  = f"价格居于通道中部（{pos_pct:.0f}%），支撑 {sup:.2f} / 阻力 {res:.2f}"
+
+    # ── 近期信号摘要 ──
+    sig_text = ""
+    if signals:
+        recent = sorted(signals, key=lambda s: s.get("signal_date", ""), reverse=True)[:3]
+        parts = [f"{s['signal_type']}（{s.get('signal_date','')[:10]}，{s.get('likelihood',0):.0%}）"
+                 for s in recent]
+        sig_text = "近期信号：" + " · ".join(parts)
+
+    # ── 渲染说明框 ──
+    rows = [
+        f'<span style="color:{trend_color}">▪ <b>趋势</b> {trend_icon}　{trend_text}</span>',
+        f'<span style="color:{vol_color}">▪ <b>量能</b> {vol_icon}　{vol_text}</span>',
+    ]
+    if atr_text:
+        rows.append(f'<span style="color:{atr_color}">▪ <b>波幅</b>　{atr_text}</span>')
+    if channel_text:
+        rows.append(f'<span style="color:{channel_color}">▪ <b>通道</b>　{channel_text}</span>')
+    if sig_text:
+        rows.append(f'<span style="color:#ab47bc">▪ <b>信号</b>　{sig_text}</span>')
+
+    body = "<br>".join(rows)
+    st.markdown(f"""
+<div style="background:#111827; border-left:3px solid #374151; padding:10px 14px;
+            border-radius:0 4px 4px 0; font-size:12px; color:#9ca3af; margin-top:-8px;">
+{body}
+</div>
+""", unsafe_allow_html=True)

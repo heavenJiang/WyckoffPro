@@ -2,35 +2,42 @@
 ui/components/counter_evidence_bar.py — 反面证据积分仪表盘（V3.1）
 """
 import streamlit as st
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from ui.components.translations import CN
 
-
-ALERT_STYLES = {
-    "NONE":   {"color": "#2ecc71", "bg": "#1a3a1a", "label": "正常", "emoji": "✅"},
-    "YELLOW": {"color": "#f1c40f", "bg": "#3a3a1a", "label": "假设受质疑", "emoji": "⚠️"},
-    "ORANGE": {"color": "#e67e22", "bg": "#3a2a1a", "label": "暂停买入", "emoji": "🟠"},
-    "RED":    {"color": "#e74c3c", "bg": "#3a1a1a", "label": "紧急反转！", "emoji": "🚨"},
+# 仪表盘专用背景色 / 图标（颜色标签由 CN.alert() 提供）
+_ALERT_EXTRA = {
+    "NONE":   {"bg": "#1a3a1a", "emoji": "✅"},
+    "GREEN":  {"bg": "#1a3a1a", "emoji": "✅"},
+    "YELLOW": {"bg": "#3a3a1a", "emoji": "⚠️"},
+    "ORANGE": {"bg": "#3a2a1a", "emoji": "🟠"},
+    "RED":    {"bg": "#3a1a1a", "emoji": "🚨"},
 }
 
 
 def render_counter_evidence_bar(score: float, alert_level: str, events: list = None):
     """渲染反面证据积分仪表盘"""
-    style = ALERT_STYLES.get(alert_level, ALERT_STYLES["NONE"])
+    label, color = CN.alert(alert_level)
+    extra = _ALERT_EXTRA.get(alert_level, _ALERT_EXTRA["NONE"])
+    bg    = extra["bg"]
+    emoji = extra["emoji"]
     score_pct = min(100, max(0, score))
     bar_width = score_pct
 
     st.markdown(f"""
-    <div style="background: {style['bg']}; border: 1px solid {style['color']}44;
+    <div style="background: {bg}; border: 1px solid {color}44;
                 border-radius: 10px; padding: 14px; margin-bottom: 8px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
             <span style="color: #aaa; font-size: 13px; font-weight: 600;">
-                {style['emoji']} 反面证据积分
+                {emoji} 反面证据积分
             </span>
-            <span style="color: {style['color']}; font-size: 18px; font-weight: 700;">
-                {score:.1f} / 100 &nbsp;·&nbsp; {style['label']}
+            <span style="color: {color}; font-size: 18px; font-weight: 700;">
+                {score:.1f} / 100 &nbsp;·&nbsp; {label}
             </span>
         </div>
         <div style="height: 8px; background: #2a2a2a; border-radius: 4px; overflow: hidden;">
-            <div style="height: 100%; width: {bar_width}%; background: {style['color']};
+            <div style="height: 100%; width: {bar_width}%; background: {color};
                          border-radius: 4px; transition: width 0.5s ease;"></div>
         </div>
         <div style="display: flex; justify-content: space-between; margin-top: 4px;

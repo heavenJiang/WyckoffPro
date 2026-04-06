@@ -1,1 +1,19 @@
-README.md
+# 密钥
+.env
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# 数据库
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 日志
+logs/

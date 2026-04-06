@@ -35,8 +35,9 @@ def calc_metrics(trades: list, initial_capital: float = 100000) -> BacktestMetri
     m.win_trades = len(wins)
     m.lose_trades = len(losses)
     m.win_rate = round(m.win_trades / m.total_trades * 100, 1)
-    m.avg_win_pct = round(np.mean([t["pnl_pct"] for t in wins]) * 100, 1) if wins else 0
-    m.avg_loss_pct = round(np.mean([t["pnl_pct"] for t in losses]) * 100, 1) if losses else 0
+    # pnl_pct 已是百分数（如 5.2 表示 5.2%）
+    m.avg_win_pct = round(np.mean([t["pnl_pct"] for t in wins]), 1) if wins else 0
+    m.avg_loss_pct = round(np.mean([t["pnl_pct"] for t in losses]), 1) if losses else 0
     total_wins = sum(t.get("pnl_amount", 0) for t in wins)
     total_losses = abs(sum(t.get("pnl_amount", 0) for t in losses))
     m.profit_factor = round(total_wins / total_losses, 2) if total_losses > 0 else float("inf")
@@ -62,7 +63,7 @@ def calc_metrics(trades: list, initial_capital: float = 100000) -> BacktestMetri
         except Exception:
             pass
 
-    returns = [t.get("pnl_pct", 0) for t in trades]
+    returns = [t.get("pnl_pct", 0) / 100 for t in trades]  # 转为小数用于 Sharpe
     if len(returns) > 1:
         std = np.std(returns)
         mean = np.mean(returns)

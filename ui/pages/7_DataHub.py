@@ -7,9 +7,12 @@ import os
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from main import config
+from ui.components.glossary import tip, md_tip
 
 st.set_page_config(page_title="DataHub - WyckoffPro", page_icon="🗄️", layout="wide")
 st.title("🗄️ 数据仓库 DataHub")
@@ -62,14 +65,20 @@ def table_stats() -> pd.DataFrame:
         ("report_rc",           "盈利预测",     "特色数据"),
         ("stk_surv",            "机构调研",     "特色数据"),
         ("stk_auction",         "集合竞价",     "特色数据"),
+        ("kline_daily",         "日K线",        "行情K线"),
+        ("kline_weekly",        "周K线",        "行情K线"),
+        ("kline_monthly",       "月K线",        "行情K线"),
     ]
     rows = []
+    # kline 表没有 updated_at，用 trade_date 代替
+    KLINE_TABLES = {"kline_daily", "kline_weekly", "kline_monthly"}
     with sqlite3.connect(DB_PATH) as conn:
         for tbl, label, category in tables:
             try:
                 cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                date_col = "trade_date" if tbl in KLINE_TABLES else "updated_at"
                 upd = conn.execute(
-                    f"SELECT MAX(updated_at) FROM {tbl}"
+                    f"SELECT MAX({date_col}) FROM {tbl}"
                 ).fetchone()[0] or "—"
                 if upd and len(upd) > 10:
                     upd = upd[:10]
@@ -87,17 +96,19 @@ stats = table_stats()
 total_rows = stats["记录数"].sum()
 synced_tables = (stats["记录数"] > 0).sum()
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("已同步表数", f"{synced_tables} / {len(stats)}")
 c2.metric("总记录数", f"{total_rows:,}")
 c3.metric("A股总数", f"{query('SELECT COUNT(*) as n FROM stock_basic').iloc[0]['n']:,}" if synced_tables else "0")
 c4.metric("概念板块", f"{query('SELECT COUNT(*) as n FROM concept').iloc[0]['n']:,}" if synced_tables else "0")
+_kline_stocks = query("SELECT COUNT(DISTINCT stock_code) as n FROM kline_daily")
+c5.metric("日线覆盖股票", f"{_kline_stocks.iloc[0]['n']:,}" if not _kline_stocks.empty else "0")
 
 st.divider()
 
 # ─── 主 Tab 导航 ───────────────────────────────────────────
-tab_overview, tab_basic, tab_mkt, tab_fin, tab_macro, tab_ref, tab_special = st.tabs([
-    "📋 总览", "🏢 基础数据", "📈 行情因子", "💰 财务数据",
+tab_overview, tab_basic, tab_kline, tab_mkt, tab_fin, tab_macro, tab_ref, tab_special = st.tabs([
+    "📋 总览", "🏢 基础数据", "📉 K线行情", "📈 行情因子", "💰 财务数据",
     "🌐 宏观经济", "📌 参考数据", "✨ 特色数据",
 ])
 
@@ -111,6 +122,7 @@ with tab_overview:
     # 分类图标映射（替代背景着色）
     CATEGORY_ICON = {
         "基础数据": "🏢",
+        "行情K线": "📉",
         "财务数据": "💰",
         "宏观经济": "🌐",
         "参考数据": "📌",
@@ -155,6 +167,15 @@ with tab_overview:
     if col_d.button("🗓️ 月度同步 hub-monthly", use_container_width=True):
         os.system("nohup python main.py hub-monthly > logs/hub_monthly.log 2>&1 &")
         st.success("月度同步已启动")
+
+    st.caption("K线行情同步")
+    col_k1, col_k2 = st.columns(2)
+    if col_k1.button("📊 全量历史K线 kline-full（约40分钟）", use_container_width=True):
+        os.system("nohup python main.py kline-full > logs/kline_full.log 2>&1 &")
+        st.success("全量K线同步已启动，日志写入 logs/kline_full.log")
+    if col_k2.button("📅 今日K线 kline-daily", use_container_width=True):
+        os.system("nohup python main.py kline-daily > logs/kline_daily.log 2>&1 &")
+        st.success("今日K线同步已启动")
 
 
 # ══════════════════════════════════════════════════════════
@@ -209,7 +230,198 @@ with tab_basic:
 
 
 # ══════════════════════════════════════════════════════════
-# Tab 3: 行情因子
+# Tab 3: K线行情
+# ══════════════════════════════════════════════════════════
+with tab_kline:
+    st.subheader("K线行情数据查询")
+
+    # ── 股票选择 ──
+    kl_col1, kl_col2, kl_col3, kl_col4 = st.columns([2, 1, 1, 1])
+    kl_code_input = kl_col1.text_input("股票代码", placeholder="如 000001.SZ 或 600519.SH", key="kl_code")
+    kl_tf = kl_col2.selectbox("周期", ["日线", "周线", "月线"], key="kl_tf")
+    kl_end   = kl_col3.date_input("结束日期", value=datetime.now(), key="kl_end")
+    kl_start = kl_col4.date_input("开始日期", value=datetime.now() - timedelta(days=365), key="kl_start")
+
+    TF_TABLE = {"日线": "kline_daily", "周线": "kline_weekly", "月线": "kline_monthly"}
+    kl_table = TF_TABLE[kl_tf]
+    kl_start_str = kl_start.strftime("%Y%m%d")
+    kl_end_str   = kl_end.strftime("%Y%m%d")
+
+    # ── 覆盖统计 ──
+    with st.expander("数据覆盖统计"):
+        cov_col1, cov_col2, cov_col3 = st.columns(3)
+        for col_w, tf_name, tbl in [
+            (cov_col1, "日线", "kline_daily"),
+            (cov_col2, "周线", "kline_weekly"),
+            (cov_col3, "月线", "kline_monthly"),
+        ]:
+            df_cov = query(f"""
+                SELECT COUNT(DISTINCT stock_code) as stocks,
+                       COUNT(*) as rows,
+                       MIN(trade_date) as min_date,
+                       MAX(trade_date) as max_date
+                FROM {tbl}
+            """)
+            if not df_cov.empty and df_cov.iloc[0]["stocks"]:
+                r = df_cov.iloc[0]
+                col_w.metric(f"{tf_name} 覆盖股票", f"{r['stocks']:,} 只")
+                col_w.caption(f"共 {r['rows']:,} 条 | {r['min_date']} ~ {r['max_date']}")
+            else:
+                col_w.metric(f"{tf_name} 覆盖股票", "0 只")
+                col_w.caption("暂无数据，请执行 kline-full")
+
+    # ── 单股 K 线查询 ──
+    if not kl_code_input:
+        st.info("请输入股票代码查询 K 线数据")
+    else:
+        # 标准化代码（兼容不带后缀的输入）
+        ts_code_kl = kl_code_input.upper().strip()
+        if "." not in ts_code_kl:
+            ts_code_kl = ts_code_kl + (".SZ" if ts_code_kl.startswith(("0", "3")) else ".SH")
+
+        # 查名称
+        name_row = query("SELECT name FROM stock_basic WHERE ts_code=?", (ts_code_kl,))
+        stock_name = name_row.iloc[0]["name"] if not name_row.empty else ts_code_kl
+
+        df_kl = query(
+            f"SELECT * FROM {kl_table} WHERE stock_code=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+            (ts_code_kl, kl_start_str, kl_end_str)
+        )
+
+        if df_kl.empty:
+            st.warning(f"{ts_code_kl} 在所选区间无{kl_tf}数据（未同步或非交易日）")
+        else:
+            st.caption(f"**{stock_name}（{ts_code_kl}）** {kl_tf} | {kl_start_str} ~ {kl_end_str} | 共 {len(df_kl)} 根K线")
+
+            # ── K 线蜡烛图 + 成交量 ──
+            fig = make_subplots(
+                rows=2, cols=1, shared_xaxes=True,
+                row_heights=[0.7, 0.3],
+                vertical_spacing=0.03
+            )
+            fig.add_trace(go.Candlestick(
+                x=df_kl["trade_date"],
+                open=df_kl["open"], high=df_kl["high"],
+                low=df_kl["low"],   close=df_kl["close"],
+                name="K线",
+                increasing_line_color="#ef5350",
+                decreasing_line_color="#26a69a",
+            ), row=1, col=1)
+
+            # 均线 MA5 / MA20
+            if len(df_kl) >= 5:
+                ma5  = df_kl["close"].rolling(5).mean()
+                fig.add_trace(go.Scatter(x=df_kl["trade_date"], y=ma5,
+                    line=dict(color="orange", width=1), name="MA5"), row=1, col=1)
+            if len(df_kl) >= 20:
+                ma20 = df_kl["close"].rolling(20).mean()
+                fig.add_trace(go.Scatter(x=df_kl["trade_date"], y=ma20,
+                    line=dict(color="royalblue", width=1), name="MA20"), row=1, col=1)
+
+            # 成交量（涨红跌绿）
+            colors = ["#ef5350" if c >= o else "#26a69a"
+                      for c, o in zip(df_kl["close"], df_kl["open"])]
+            fig.add_trace(go.Bar(
+                x=df_kl["trade_date"], y=df_kl["volume"],
+                marker_color=colors, name="成交量", showlegend=False,
+            ), row=2, col=1)
+
+            n_kl = len(df_kl)
+            n_show_kl = min(120, n_kl)
+            kl_range = [n_kl - n_show_kl - 0.5, n_kl - 0.5]
+            fig.update_layout(
+                height=560,
+                margin=dict(l=0, r=0, t=20, b=0),
+                legend=dict(orientation="h", y=1.02),
+                plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                font=dict(color="#fafafa"),
+                xaxis=dict(
+                    type="category", range=kl_range,
+                    rangeslider=dict(visible=False),
+                    gridcolor="#1e2533", tickangle=-45, nticks=10,
+                ),
+                yaxis=dict(gridcolor="#1e2533"),
+                xaxis2=dict(
+                    type="category", range=kl_range,
+                    rangeslider=dict(visible=False),
+                    gridcolor="#1e2533",
+                ),
+                yaxis2=dict(gridcolor="#1e2533"),
+            )
+            st.plotly_chart(fig, use_container_width=True, config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                "doubleClick": "reset",
+            })
+            st.markdown("""
+<div style="background:#111827; border-left:3px solid #374151; padding:10px 14px;
+            border-radius:0 4px 4px 0; font-size:12px; color:#9ca3af; margin-top:-8px;">
+<b style="color:#d1d5db;">📊 K线行情</b>　A股惯例：涨红跌绿。蜡烛实体越长说明多空分歧越大；
+连续长阳伴随缩量往往是主力控盘拉升，连续长阴伴随放量则为出货信号。<br>
+<b style="color:#ff9800;">MA5</b> 短期趋势参考（5日均线），<b style="color:#4169e1;">MA20</b> 为中期趋势基准（月线）。
+价格站上 MA20 后回踩不破视为多头结构有效；MA5 上穿 MA20 为金叉，下穿为死叉。<br>
+<b style="color:#d1d5db;">成交量</b>　量价关系是判断行情真伪的核心：价升量增为真实上涨，价升量缩需警惕；
+底部出现大量级别的缩量（地量）常是止跌信号，配合 K 线形态可确认吸筹底部。
+</div>
+""", unsafe_allow_html=True)
+
+            # ── 指标卡片 ──
+            latest = df_kl.iloc[-1]
+            prev   = df_kl.iloc[-2] if len(df_kl) > 1 else latest
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("最新收盘", f"{latest['close']:.2f}",
+                      delta=f"{latest['close'] - prev['close']:.2f}")
+            m2.metric("涨跌幅", f"{latest.get('pct_change', 0):.2f}%")
+            m3.metric("成交量", f"{latest['volume']/1e4:.1f}万")
+            m4.metric("振幅", f"{latest.get('amplitude', 0):.2f}%" if pd.notna(latest.get('amplitude')) else "—", help=tip("振幅"))
+            m5.metric("换手率", f"{latest.get('turnover_rate', 0):.2f}%" if pd.notna(latest.get('turnover_rate')) else "—", help=tip("换手率"))
+            m6.metric("成交额", f"{latest.get('amount', 0)/1e4:.1f}万" if pd.notna(latest.get('amount')) else "—")
+
+            # ── 明细表 ──
+            with st.expander("查看明细数据"):
+                show_cols = [c for c in ["trade_date","open","high","low","close","volume",
+                                         "amount","pct_change","amplitude","turnover_rate","atr_20"]
+                             if c in df_kl.columns]
+                st.dataframe(df_kl[show_cols].sort_values("trade_date", ascending=False),
+                             use_container_width=True, hide_index=True)
+
+    # ── 多股对比 ──
+    st.divider()
+    st.markdown("#### 收盘价走势对比")
+    compare_input = st.text_input(
+        "输入多个代码（逗号分隔）",
+        placeholder="如 000001.SZ,600519.SH,300750.SZ",
+        key="kl_compare"
+    )
+    if compare_input:
+        codes = [c.strip().upper() for c in compare_input.split(",") if c.strip()]
+        fig2 = go.Figure()
+        for code in codes:
+            if "." not in code:
+                code = code + (".SZ" if code.startswith(("0","3")) else ".SH")
+            df_cmp = query(
+                f"SELECT trade_date, close FROM kline_daily WHERE stock_code=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+                (code, kl_start_str, kl_end_str)
+            )
+            if not df_cmp.empty:
+                # 归一化为百分比涨跌
+                base = df_cmp["close"].iloc[0]
+                df_cmp["pct"] = (df_cmp["close"] / base - 1) * 100
+                fig2.add_trace(go.Scatter(x=df_cmp["trade_date"], y=df_cmp["pct"],
+                                          mode="lines", name=code))
+        fig2.update_layout(
+            height=360, yaxis_title="累计涨跌幅 (%)",
+            margin=dict(l=0, r=0, t=20, b=0),
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+            font=dict(color="#fafafa"),
+            xaxis=dict(gridcolor="#1e2533"), yaxis=dict(gridcolor="#1e2533"),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════
+# Tab 4: 行情因子
 # ══════════════════════════════════════════════════════════
 with tab_mkt:
     st.subheader("行情因子查询")
@@ -259,7 +471,18 @@ with tab_mkt:
                 st.caption("PB 趋势")
                 st.line_chart(df_sf.set_index("trade_date")["pb"])
             with st.expander("查看全部因子明细"):
-                st.dataframe(df_sf, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    df_sf,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "pe_ttm":         st.column_config.NumberColumn("PE(TTM)",        help=tip("PE(TTM)"),  format="%.2f"),
+                        "pb":             st.column_config.NumberColumn("PB",             help=tip("PB"),       format="%.2f"),
+                        "ps_ttm":         st.column_config.NumberColumn("PS(TTM)",        help=tip("PS"),       format="%.2f"),
+                        "turnover_rate_f": st.column_config.NumberColumn("换手率(流通)",  help=tip("换手率"),   format="%.2f%%"),
+                        "volume_ratio":   st.column_config.NumberColumn("量比",           help=tip("量比"),     format="%.2f"),
+                    }
+                )
 
 
 # ══════════════════════════════════════════════════════════
@@ -285,12 +508,28 @@ with tab_fin:
             # 最新一期卡片
             latest = df_fi.iloc[0]
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("ROE", f"{latest.get('roe', 0):.1f}%" if latest.get('roe') else "—")
-            c2.metric("毛利率", f"{latest.get('grossprofit_margin', 0):.1f}%" if latest.get('grossprofit_margin') else "—")
-            c3.metric("净利率", f"{latest.get('netprofit_margin', 0):.1f}%" if latest.get('netprofit_margin') else "—")
-            c4.metric("资产负债率", f"{latest.get('debt_to_assets', 0):.1f}%" if latest.get('debt_to_assets') else "—")
-            c5.metric("PE", f"{latest.get('pe', 0):.1f}x" if latest.get('pe') else "—")
-            st.dataframe(df_fi, use_container_width=True, hide_index=True)
+            c1.metric("ROE", f"{latest.get('roe', 0):.1f}%" if latest.get('roe') else "—", help=tip("ROE"))
+            c2.metric("毛利率", f"{latest.get('grossprofit_margin', 0):.1f}%" if latest.get('grossprofit_margin') else "—", help=tip("毛利率"))
+            c3.metric("净利率", f"{latest.get('netprofit_margin', 0):.1f}%" if latest.get('netprofit_margin') else "—", help=tip("净利率"))
+            c4.metric("资产负债率", f"{latest.get('debt_to_assets', 0):.1f}%" if latest.get('debt_to_assets') else "—", help=tip("资产负债率"))
+            c5.metric("PE", f"{latest.get('pe', 0):.1f}x" if latest.get('pe') else "—", help=tip("PE"))
+            st.dataframe(
+                df_fi,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "eps":               st.column_config.NumberColumn("EPS",     help=tip("EPS"),    format="%.3f"),
+                    "bps":               st.column_config.NumberColumn("BPS",     help=tip("BPS"),    format="%.3f"),
+                    "roe":               st.column_config.NumberColumn("ROE(%)",  help=tip("ROE"),    format="%.2f"),
+                    "roa":               st.column_config.NumberColumn("ROA(%)",  help=tip("ROA"),    format="%.2f"),
+                    "grossprofit_margin": st.column_config.NumberColumn("毛利率(%)", help=tip("毛利率"), format="%.2f"),
+                    "netprofit_margin":  st.column_config.NumberColumn("净利率(%)", help=tip("净利率"), format="%.2f"),
+                    "debt_to_assets":    st.column_config.NumberColumn("资产负债率(%)", help=tip("资产负债率"), format="%.2f"),
+                    "current_ratio":     st.column_config.NumberColumn("流动比率", help=tip("流动比率"), format="%.2f"),
+                    "pe":                st.column_config.NumberColumn("PE",      help=tip("PE"),     format="%.2f"),
+                    "pb":                st.column_config.NumberColumn("PB",      help=tip("PB"),     format="%.2f"),
+                }
+            )
 
     with fin_sub2:
         df_inc = query(
@@ -402,7 +641,7 @@ with tab_ref:
         if not df_pledge.empty:
             high_risk = df_pledge[df_pledge["质押比例_pct"] >= 50]
             st.warning(f"质押比例 ≥ 50% 的股票：{len(high_risk)} 只") if not high_risk.empty else None
-            pct_filter = st.slider("最低质押比例 (%)", 0, 100, 20)
+            pct_filter = st.slider("最低质押比例 (%)", 0, 100, 20, help=tip("质押比例"))
             st.dataframe(df_pledge[df_pledge["质押比例_pct"] >= pct_filter], use_container_width=True, hide_index=True)
         else:
             st.info("暂无质押数据")
@@ -452,7 +691,7 @@ with tab_ref:
         st.dataframe(df_ht, use_container_width=True, hide_index=True)
 
     with ref_sub4:
-        st.subheader("龙虎榜")
+        st.markdown("### " + md_tip("龙虎榜"), unsafe_allow_html=True)
         dragon_date = st.date_input("选择日期", value=datetime.now() - timedelta(days=1))
         df_top = query(
             "SELECT t.ts_code, t.name, t.pct_change, t.net_amount, t.l_buy, t.l_sell, t.reason FROM top_list t WHERE t.trade_date=? ORDER BY ABS(t.net_amount) DESC",
@@ -465,7 +704,7 @@ with tab_ref:
             st.dataframe(df_top, use_container_width=True, hide_index=True)
 
     with ref_sub5:
-        st.subheader("融资融券余额")
+        st.markdown("### " + md_tip("融资融券"), unsafe_allow_html=True)
         wl_mg = query("SELECT ts_code, stock_name FROM watchlist")
         mg_options = [f"{r['ts_code']} {r['stock_name']}" for _, r in wl_mg.iterrows()] if not wl_mg.empty else []
         sel_mg = st.selectbox("选择股票", mg_options, key="mg_stock") if mg_options else st.text_input("输入代码", key="mg_code")
@@ -537,9 +776,9 @@ with tab_special:
         else:
             latest_cyq = df_cyq.iloc[0]
             c1, c2, c3 = st.columns(3)
-            c1.metric("获利盘比例", f"{latest_cyq['winner_rate']:.1f}%" if pd.notna(latest_cyq.get('winner_rate')) else "—")
-            c2.metric("50%集中成本", f"{latest_cyq['cost_50pct']:.2f}" if pd.notna(latest_cyq.get('cost_50pct')) else "—")
-            c3.metric("95%集中成本", f"{latest_cyq['cost_95pct']:.2f}" if pd.notna(latest_cyq.get('cost_95pct')) else "—")
+            c1.metric("获利盘比例", f"{latest_cyq['winner_rate']:.1f}%" if pd.notna(latest_cyq.get('winner_rate')) else "—", help=tip("获利盘"))
+            c2.metric("50%集中成本", f"{latest_cyq['cost_50pct']:.2f}" if pd.notna(latest_cyq.get('cost_50pct')) else "—", help="50%筹码集中分布的成本价位区间中值，是重要的支撑/阻力参考位。")
+            c3.metric("95%集中成本", f"{latest_cyq['cost_95pct']:.2f}" if pd.notna(latest_cyq.get('cost_95pct')) else "—", help="95%筹码的成本上限，即绝大多数持仓者的成本上限，常作为强阻力位参考。")
 
             st.caption("筹码成本分布（不同百分位）")
             chart_data = df_cyq[["trade_date", "cost_5pct", "cost_15pct", "cost_50pct", "cost_85pct", "cost_95pct"]].set_index("trade_date").iloc[::-1]
@@ -547,7 +786,7 @@ with tab_special:
             st.dataframe(df_cyq, use_container_width=True, hide_index=True)
 
     with sp_sub3:
-        st.subheader("机构调研记录")
+        st.markdown("### " + md_tip("机构调研"), unsafe_allow_html=True)
         wl_surv = query("SELECT ts_code, stock_name FROM watchlist")
         surv_options = [f"{r['ts_code']} {r['stock_name']}" for _, r in wl_surv.iterrows()] if not wl_surv.empty else []
         sel_surv = st.selectbox("选择股票", surv_options, key="surv_stock") if surv_options else st.text_input("输入代码", key="surv_code")
@@ -593,7 +832,7 @@ with tab_special:
             st.dataframe(df_rc, use_container_width=True, hide_index=True)
 
     with sp_sub5:
-        st.subheader("券商金股推荐")
+        st.markdown("### " + md_tip("券商金股"), unsafe_allow_html=True)
         df_br = query(
             "SELECT month, broker, ts_code, name, reason FROM broker_recommend ORDER BY month DESC LIMIT 100"
         )
